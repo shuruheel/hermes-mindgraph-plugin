@@ -1,0 +1,19 @@
+# For manual installation: copy this file + __init__.py to
+# ~/.hermes/plugins/mindgraph/
+#
+# For pip installation, use: pip install hermes-mindgraph-plugin
+# (auto-discovered via entry points, no manual copy needed)
+
+name: mindgraph
+version: 0.1.0
+description: >
+  Semantic graph memory provider — injects session context (goals, decisions,
+  policies) and per-turn topic-relevant knowledge from MindGraph into the
+  agent's context via plugin lifecycle hooks.
+author: Shan Rizvi
+requires_env:
+  - MINDGRAPH_API_KEY
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - on_session_end
