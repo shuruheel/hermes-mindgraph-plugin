@@ -32,5 +32,8 @@ Homepage = "https://mindgraph.cloud"
 Repository = "https://github.com/shuruheel/hermes-mindgraph-plugin"
 Issues = "https://github.com/shuruheel/hermes-mindgraph-plugin/issues"
 
+[tool.hatch.build.targets.wheel]
+packages = ["hermes_mindgraph_plugin"]
+
 [project.entry-points."hermes_agent.plugins"]
 mindgraph = "hermes_mindgraph_plugin"
