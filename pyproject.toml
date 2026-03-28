@@ -29,8 +29,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://mindgraph.cloud"
-Repository = "https://github.com/mindgraph-ai/hermes-mindgraph-plugin"
-Issues = "https://github.com/mindgraph-ai/hermes-mindgraph-plugin/issues"
+Repository = "https://github.com/shuruheel/hermes-mindgraph-plugin"
+Issues = "https://github.com/shuruheel/hermes-mindgraph-plugin/issues"
 
 [project.entry-points."hermes_agent.plugins"]
 mindgraph = "hermes_mindgraph_plugin"

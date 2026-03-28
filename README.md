@@ -61,7 +61,7 @@ See the `plugin.yaml` in this repo for the manifest format.
 ## Development
 
 ```bash
-git clone https://github.com/mindgraph-ai/hermes-mindgraph-plugin
+git clone https://github.com/shuruheel/hermes-mindgraph-plugin
 cd hermes-mindgraph-plugin
 pip install -e ".[dev]"
 pytest
