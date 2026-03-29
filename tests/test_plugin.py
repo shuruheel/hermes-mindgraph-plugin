@@ -72,6 +72,23 @@ class TestOnSessionStart:
         mock_open.assert_called_once_with(label="hermes-abcdef99")
 
     @patch("hermes_mindgraph_plugin._is_available", return_value=True)
+    def test_skips_session_for_cron_platform(self, _avail):
+        """Cron sessions should not open MindGraph sessions or prefetch context."""
+        mock_open = MagicMock(return_value="sess-uid-123")
+
+        with patch.dict(sys.modules, {
+            "tools.mindgraph_tool": MagicMock(
+                auto_open_session=mock_open,
+                retrieve_session_context=MagicMock(return_value="context"),
+            ),
+        }):
+            plugin._on_session_start(session_id="cron-job-1", model="test", platform="cron")
+
+        assert not plugin._session_started
+        assert plugin._session_context_cache is None
+        mock_open.assert_not_called()
+
+    @patch("hermes_mindgraph_plugin._is_available", return_value=True)
     def test_session_start_failure_is_nonfatal(self, _avail):
         mock_open = MagicMock(side_effect=RuntimeError("connection refused"))
 

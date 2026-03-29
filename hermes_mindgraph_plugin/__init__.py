@@ -21,7 +21,7 @@ Hooks registered:
     on_session_end    — Closes the MindGraph session.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 import logging
 from typing import Optional
@@ -61,6 +61,12 @@ def _on_session_start(
     first with the accumulated transcript for post-session ingestion.
     """
     global _session_context_cache, _session_started, _accumulated_messages, _current_session_id
+
+    # Skip MindGraph entirely for cron sessions — they're low-signal
+    # automated runs that would pollute the knowledge graph.
+    if platform == "cron":
+        logger.debug("Skipping MindGraph session for cron platform")
+        return
 
     # Close the *previous* session if one exists with a different ID.
     # This is the real session-close point: on_session_end fires after
