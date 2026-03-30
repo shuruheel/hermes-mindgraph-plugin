@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mindgraph-plugin"
-version = "0.1.3"
+version = "0.2.0"
 description = "MindGraph semantic graph memory plugin for Hermes Agent"
 readme = "README.md"
 license = "MIT"

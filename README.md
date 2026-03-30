@@ -1,14 +1,30 @@
 # hermes-mindgraph-plugin
 
-Semantic graph memory plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Gives any Hermes-powered agent persistent memory across sessions using [MindGraph](https://mindgraph.cloud).
+MindGraph semantic graph memory plugin for [Hermes Agent](https://github.com/shuruheel/hermes-agent). One install gives your agent persistent, structured memory across sessions — no separate MCP server needed.
 
-## What it does
+## What You Get
 
-This plugin hooks into Hermes Agent's lifecycle to provide:
+**11 cognitive tools** registered into the `mindgraph` toolset:
 
-- **Session context** — Active goals, open decisions, governance policies, weak claims, and user profile are injected into the agent's context at the start of each conversation.
-- **Per-turn retrieval** — Score-gated semantic search finds topic-relevant knowledge from the graph and injects it ephemerally (never persisted to conversation history, no prompt cache breakage).
-- **Session lifecycle** — Automatically opens and closes MindGraph sessions aligned with Hermes conversations.
+| Tool | Layer | Purpose |
+|------|-------|---------|
+| `mindgraph_session` | Memory | Open/close sessions |
+| `mindgraph_journal` | Memory | Low-friction capture (observations, notes, preferences) |
+| `mindgraph_capture` | Reality | Entities, observations, concepts with deduplication |
+| `mindgraph_argue` | Epistemic | Structured claims with evidence + confidence |
+| `mindgraph_inquire` | Epistemic | Questions, hypotheses, anomalies |
+| `mindgraph_commit` | Intent | Goals, projects, milestones |
+| `mindgraph_decide` | Intent | Decisions with options and resolution |
+| `mindgraph_action` | Action | Risks and affordances |
+| `mindgraph_plan` | Agent | Plans, tasks, execution, governance policies |
+| `mindgraph_retrieve` | Query | Hybrid semantic search, goals, questions, context |
+| `mindgraph_ingest` | Memory | Long-form content ingestion |
+
+**3 lifecycle hooks** for automatic memory management:
+
+- **on_session_start** — Opens a MindGraph session, pre-fetches context (goals, decisions, policies, weak claims)
+- **pre_llm_call** — Injects session context on first turn; score-gated semantic retrieval every turn
+- **on_session_end** — Closes the session with transcript ingestion for post-session knowledge extraction
 
 ## Install
 
@@ -16,63 +32,45 @@ This plugin hooks into Hermes Agent's lifecycle to provide:
 pip install hermes-mindgraph-plugin
 ```
 
-The plugin is auto-discovered via the `hermes_agent.plugins` entry point. No configuration beyond the API key is needed.
+## Configure
 
-## Setup
-
-1. Get a MindGraph API key at [mindgraph.cloud](https://mindgraph.cloud)
-2. Add it to your Hermes environment:
+Set your MindGraph API key (get one at [mindgraph.cloud](https://mindgraph.cloud)):
 
 ```bash
-echo "MINDGRAPH_API_KEY=mg_your_key_here" >> ~/.hermes/.env
+# In ~/.hermes/.env
+MINDGRAPH_API_KEY=your_api_key_here
 ```
 
-3. Verify the plugin is loaded:
+The plugin is auto-discovered via the `hermes_agent.plugins` entry point. No further configuration needed — tools and hooks register automatically when Hermes starts.
 
-```bash
-hermes plugins list
+## Manual Install
+
+Alternatively, copy the `hermes_mindgraph_plugin` package to `~/.hermes/plugins/mindgraph/` with a `plugin.yaml`:
+
+```yaml
+name: mindgraph
+version: 0.2.0
+description: MindGraph semantic graph memory
 ```
 
-## How it works
+## Architecture
 
-The plugin registers three [lifecycle hooks](https://hermes.nousresearch.com/docs/user-guide/features/plugins):
+The plugin uses MindGraph's [5-layer cognitive architecture](https://mindgraph.cloud):
 
-| Hook | When | What |
-|------|------|------|
-| `on_session_start` | New conversation begins | Opens a MindGraph session, pre-fetches goals/decisions/policies |
-| `pre_llm_call` | Before each agent turn | Returns session context (first turn) + semantic retrieval (every turn) |
-| `on_session_end` | Conversation ends | Closes the MindGraph session |
+- **Reality layer** — entities, observations, facts about the world
+- **Epistemic layer** — claims, evidence, questions, hypotheses, concepts
+- **Intent layer** — goals, decisions, projects, milestones
+- **Action layer** — risks, affordances, capabilities
+- **Agent layer** — plans, tasks, execution tracking, governance policies
 
-Context is injected **ephemerally** into the system prompt — it's never persisted to the session database and doesn't break Anthropic's prompt cache prefix.
-
-All MindGraph API calls are wrapped in try/except. A MindGraph failure never breaks the conversation.
-
-## Manual install (alternative)
-
-If you prefer not to use pip, copy the plugin directly:
-
-```bash
-mkdir -p ~/.hermes/plugins/mindgraph
-# Copy plugin.yaml and __init__.py into that directory
-```
-
-See the `plugin.yaml` in this repo for the manifest format.
-
-## Development
-
-```bash
-git clone https://github.com/shuruheel/hermes-mindgraph-plugin
-cd hermes-mindgraph-plugin
-pip install -e ".[dev]"
-pytest
-```
+Context is proactively injected each turn using score-gated semantic retrieval (threshold: 0.55) — the agent gets relevant knowledge without explicit tool calls. Tools are available for deeper queries and active knowledge capture.
 
 ## Requirements
 
-- Hermes Agent ≥ v0.5.0 (plugin lifecycle hooks)
-- Python ≥ 3.10
-- `mindgraph-sdk` ≥ 0.1.4
-- `MINDGRAPH_API_KEY` environment variable
+- Python >= 3.10
+- `mindgraph-sdk >= 0.1.4`
+- A MindGraph API key
+- Hermes Agent with plugin support
 
 ## License
 

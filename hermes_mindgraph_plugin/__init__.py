@@ -14,6 +14,15 @@ The plugin is auto-discovered via the ``hermes_agent.plugins`` entry point.
 It can also be installed manually by copying this package to
 ``~/.hermes/plugins/mindgraph/`` with an accompanying ``plugin.yaml``.
 
+What you get:
+    11 MindGraph tools — session, journal, argue, commit, retrieve, ingest,
+    capture, inquire, action, decide, plan — registered into the "mindgraph"
+    toolset so the agent can read/write the semantic graph.
+
+    3 lifecycle hooks — on_session_start, pre_llm_call, on_session_end —
+    for automatic session management, context injection, and transcript
+    ingestion.
+
 Hooks registered:
     on_session_start  — Opens a MindGraph session, pre-fetches context.
     pre_llm_call      — Injects session context (goals, decisions, policies)
@@ -21,7 +30,7 @@ Hooks registered:
     on_session_end    — Closes the MindGraph session.
 """
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 import logging
 from typing import Optional
@@ -42,7 +51,7 @@ _atexit_registered: bool = False
 def _is_available() -> bool:
     """Check if MindGraph is configured and ready."""
     try:
-        from tools.mindgraph_tool import check_requirements
+        from hermes_mindgraph_plugin.tools import check_requirements
         return check_requirements()
     except ImportError:
         return False
@@ -85,7 +94,7 @@ def _on_session_start(
 
     # Open session
     try:
-        from tools.mindgraph_tool import auto_open_session
+        from hermes_mindgraph_plugin.tools import auto_open_session
 
         label = f"hermes-{session_id[:8]}" if session_id else "hermes-session"
         sid = auto_open_session(label=label)
@@ -98,7 +107,7 @@ def _on_session_start(
     # Pre-fetch session context (goals, decisions, policies, weak claims)
     # so it's ready for the first pre_llm_call without blocking.
     try:
-        from tools.mindgraph_tool import retrieve_session_context
+        from hermes_mindgraph_plugin.tools import retrieve_session_context
 
         _session_context_cache = retrieve_session_context()
     except Exception as exc:
@@ -142,7 +151,7 @@ def _pre_llm_call(
     # --- Per-turn semantic retrieval ---
     if user_message:
         try:
-            from tools.mindgraph_tool import proactive_graph_retrieve
+            from hermes_mindgraph_plugin.tools import proactive_graph_retrieve
 
             turn_ctx = proactive_graph_retrieve(user_message)
             if turn_ctx:
@@ -167,7 +176,7 @@ def _close_mindgraph_session(session_id: str):
         return
 
     try:
-        from tools.mindgraph_tool import auto_close_session
+        from hermes_mindgraph_plugin.tools import auto_close_session
 
         summary = (
             f"Session {session_id[:8] if session_id else 'unknown'} (completed)"
@@ -268,8 +277,31 @@ def _on_session_end(
 # ---------------------------------------------------------------------------
 
 def register(ctx):
-    """Register MindGraph memory hooks with the Hermes plugin system."""
+    """Register MindGraph memory tools and lifecycle hooks with the Hermes plugin system."""
+
+    # --- Register all 11 MindGraph tools ---
+    try:
+        from hermes_mindgraph_plugin.tools import TOOLS
+
+        for tool in TOOLS:
+            ctx.register_tool(
+                name=tool["name"],
+                toolset=tool["toolset"],
+                schema=tool["schema"],
+                handler=tool["handler"],
+                check_fn=tool.get("check_fn"),
+                requires_env=tool.get("requires_env"),
+                emoji=tool.get("emoji", ""),
+            )
+        logger.info("MindGraph plugin: registered %d tools", len(TOOLS))
+    except ImportError as exc:
+        logger.warning("MindGraph plugin: failed to import tools — %s", exc)
+    except Exception as exc:
+        logger.warning("MindGraph plugin: tool registration failed — %s", exc)
+
+    # --- Register lifecycle hooks ---
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
-    logger.info("MindGraph memory plugin registered (3 lifecycle hooks)")
+
+    logger.info("MindGraph memory plugin registered (11 tools + 3 lifecycle hooks)")
