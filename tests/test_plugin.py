@@ -98,11 +98,20 @@ class TestOnSessionStart:
         mock_open.assert_called_once_with(label="hermes-abcdef99")
 
     @patch("hermes_mindgraph_plugin._is_available", return_value=True)
-    def test_skips_session_for_cron_platform(self, _avail):
-        """Cron sessions should not open MindGraph sessions or prefetch context."""
-        plugin._on_session_start(session_id="cron-job-1", model="test", platform="cron")
-        assert not plugin._session_started
-        assert plugin._session_context_cache is None
+    def test_cron_reads_context_but_skips_session_open(self, _avail):
+        """Cron sessions should fetch context (read) but not open a session (write)."""
+        mock_open = MagicMock(return_value="session-uid")
+        mock_ctx = MagicMock(return_value="## Goals\n- Ship it")
+
+        with patch("hermes_mindgraph_plugin.tools.auto_open_session", mock_open), \
+             patch("hermes_mindgraph_plugin.tools.retrieve_session_context", mock_ctx):
+            plugin._on_session_start(session_id="cron-job-1", model="test", platform="cron")
+
+        assert not plugin._session_started  # No session opened
+        mock_open.assert_not_called()       # auto_open_session NOT called
+        mock_ctx.assert_called_once()       # But context WAS fetched
+        assert plugin._session_context_cache == "## Goals\n- Ship it"
+        assert plugin._is_cron_session is True
 
     @patch("hermes_mindgraph_plugin._is_available", return_value=True)
     def test_session_start_failure_is_nonfatal(self, _avail):

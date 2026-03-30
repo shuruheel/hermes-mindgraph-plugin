@@ -30,7 +30,7 @@ Hooks registered:
     on_session_end    — Closes the MindGraph session.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 import logging
 from typing import Optional
@@ -46,6 +46,7 @@ _session_started: bool = False
 _accumulated_messages: list = []
 _current_session_id: Optional[str] = None
 _atexit_registered: bool = False
+_is_cron_session: bool = False  # Read-only mode: context injection, no session/ingestion
 
 
 def _is_available() -> bool:
@@ -69,19 +70,17 @@ def _on_session_start(
     If a previous session is still open (different session_id), close it
     first with the accumulated transcript for post-session ingestion.
     """
-    global _session_context_cache, _session_started, _accumulated_messages, _current_session_id
+    global _session_context_cache, _session_started, _accumulated_messages, _current_session_id, _is_cron_session
 
-    # Skip MindGraph entirely for cron sessions — they're low-signal
-    # automated runs that would pollute the knowledge graph.
-    if platform == "cron":
-        logger.debug("Skipping MindGraph session for cron platform")
-        return
+    _is_cron = platform == "cron"
+    _is_cron_session = _is_cron
 
     # Close the *previous* session if one exists with a different ID.
     # This is the real session-close point: on_session_end fires after
     # every run_conversation() call (every message), but on_session_start
     # fires only when a new session begins — so we close here.
-    if _session_started and _current_session_id and _current_session_id != session_id:
+    # (Skip for cron — cron never opens sessions.)
+    if not _is_cron and _session_started and _current_session_id and _current_session_id != session_id:
         _close_mindgraph_session(_current_session_id)
 
     _session_context_cache = None
@@ -92,20 +91,25 @@ def _on_session_start(
     if not _is_available():
         return
 
-    # Open session
-    try:
-        from hermes_mindgraph_plugin.tools import auto_open_session
+    # Open session — skip for cron (no session node pollution in graph)
+    if not _is_cron:
+        try:
+            from hermes_mindgraph_plugin.tools import auto_open_session
 
-        label = f"hermes-{session_id[:8]}" if session_id else "hermes-session"
-        sid = auto_open_session(label=label)
-        if sid:
-            logger.info("MindGraph session opened: %s", sid)
-            _session_started = True
-    except Exception as exc:
-        logger.debug("MindGraph session open failed (non-fatal): %s", exc)
+            label = f"hermes-{session_id[:8]}" if session_id else "hermes-session"
+            sid = auto_open_session(label=label)
+            if sid:
+                logger.info("MindGraph session opened: %s", sid)
+                _session_started = True
+        except Exception as exc:
+            logger.debug("MindGraph session open failed (non-fatal): %s", exc)
+    else:
+        logger.info("MindGraph cron mode: read-only (no session open, context will be fetched)")
 
     # Pre-fetch session context (goals, decisions, policies, weak claims)
     # so it's ready for the first pre_llm_call without blocking.
+    # Cron jobs GET this too — they need goals, policies, and recent
+    # activity context to make informed decisions.
     try:
         from hermes_mindgraph_plugin.tools import retrieve_session_context
 
@@ -134,8 +138,8 @@ def _pre_llm_call(
     if not _is_available():
         return None
 
-    # --- Accumulate messages for post-session ingestion ---
-    if conversation_history:
+    # --- Accumulate messages for post-session ingestion (skip for cron) ---
+    if conversation_history and not _is_cron_session:
         _accumulate_messages(conversation_history)
 
     parts: list[str] = []
