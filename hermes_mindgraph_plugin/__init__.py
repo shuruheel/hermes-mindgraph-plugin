@@ -30,7 +30,7 @@ Hooks registered:
     on_session_end    — Closes the MindGraph session.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import logging
 from typing import Optional
