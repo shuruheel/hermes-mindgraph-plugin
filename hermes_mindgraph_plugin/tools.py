@@ -402,11 +402,12 @@ def retrieve_session_context() -> Optional[str]:
         "**mindgraph_journal** — low-friction capture (default when unsure)\n"
         "Entry types: observation (factual, default), preference (likes/dislikes), "
         "note (general), reflection (meta/process), insight (connections/patterns).\n"
+        "Use for: user preferences, environmental observations, session insights, patterns noticed.\n"
         "Anti-pattern: Don't journal things that are really claims → use argue. "
         "Don't journal goals → use commit.\n\n"
         #
         "**mindgraph_argue** — structured epistemic claims\n"
-        "Use for: technical conclusions, analytical positions, predictions, assessments.\n"
+        "Use for: technical conclusions, analytical positions, predictions, assessments, disagreements.\n"
         "Confidence calibration: 0.9-1.0 near-certain/verified; 0.7-0.8 confident/good evidence (default 0.7); "
         "0.5-0.6 plausible/uncertain; 0.3-0.4 speculative; 0.1-0.2 intuition only.\n"
         "Anti-pattern: Don't argue observations ('sky is blue') or preferences. Claims should be falsifiable.\n\n"
@@ -422,15 +423,17 @@ def retrieve_session_context() -> Optional[str]:
         "Use when a real choice point exists with distinct options to weigh.\n\n"
         #
         "**mindgraph_capture** — Reality layer entities and facts\n"
-        "entity: each entity_type creates a distinct node type with its own properties:\n"
-        "  person (occupation, nationality, birth_date), organization (domain, description), "
-        "nation (description), place (description), event (description), concept (domain, description), "
-        "work, other.\n"
-        "observation: factual observations about the world.\n"
-        "concept: abstract theories, frameworks, patterns (Epistemic layer).\n"
-        "For people: use entity_type='person' with props like occupation, nationality. "
-        "For their company: entity_type='organization'. "
-        "Keep entity nodes for stable identity — use separate observations for what you learned about them.\n\n"
+        "Each entity_type creates a DISTINCT node type with its own properties and edge types:\n"
+        "  person: occupation, nationality, birth_date, death_date, identifiers, attributes\n"
+        "  organization: domain, description\n"
+        "  nation: description\n"
+        "  place: description\n"
+        "  event: description\n"
+        "  concept: domain, description\n"
+        "  work, other: generic Entity fallback\n"
+        "Also: observation (factual observations), concept (abstract theories/frameworks via Epistemic layer).\n"
+        "Entity nodes are for stable identity — use separate observation nodes for what you learn about them. "
+        "This enables relevance-based retrieval: different observations surface in different contexts.\n\n"
         #
         "**mindgraph_inquire** — questions, hypotheses, anomalies\n"
         "question: open questions worth tracking (surfaces at session start).\n"
@@ -460,6 +463,24 @@ def retrieve_session_context() -> Optional[str]:
         "Triggers: user says 'remember when...' → search first. Planning session → retrieve goals. "
         "User seems stuck → retrieve decisions and context.\n\n"
         #
+        # ── Building a social graph ──
+        #
+        "## Building a Social Graph\n"
+        "Proactively build a living social graph from conversations. Whenever you encounter a person, "
+        "organization, nation, or event worth remembering, create typed entity nodes and link them "
+        "with observations.\n\n"
+        "Pattern:\n"
+        "1. capture(entity_type='person', props={occupation, nationality}) — typed Person node\n"
+        "2. capture(entity_type='organization') — their company/institution\n"
+        "3. capture(observation) per distinct fact — 'Alice leads memory team at DeepMind', "
+        "'DeepMind is a subsidiary of Google'. Each observation links entities in the graph.\n"
+        "4. argue() when you form a view — 'Alice would be a strong collaborator because...' "
+        "with evidence and confidence. Makes reasoning queryable and revisable.\n\n"
+        "The bar for creating nodes: 'would I want to retrieve this in a future conversation?' "
+        "If yes, create the node. Don't create nodes for every name dropped in passing.\n\n"
+        "This makes the graph queryable: 'who do we know at AI labs?', 'what organizations work on "
+        "knowledge graphs?', 'what's the relationship between X and Y?' — all become retrieval queries.\n\n"
+        #
         # ── Compound patterns ──
         #
         "## Compound Patterns\n"
@@ -468,7 +489,9 @@ def retrieve_session_context() -> Optional[str]:
         "- **Completing a goal:** retrieve goals → commit status=completed → journal lessons learned\n"
         "- **Researching a person:** capture(entity_type='person', props={occupation, nationality}) → "
         "capture(entity_type='organization') for their company → multiple capture(observation) for findings → "
-        "plan create_task for follow-up\n\n"
+        "argue(claim about their relevance/fit) → plan create_task for follow-up\n"
+        "- **Starting a new session:** session-start context is auto-injected. "
+        "Retrieve anything specific to the user's first message before proceeding.\n\n"
         #
         # ── Judgment calls & pitfalls ──
         #
@@ -478,7 +501,10 @@ def retrieve_session_context() -> Optional[str]:
         "- Post-session extraction runs automatically — focus on high-signal items, not exhaustive capture.\n"
         "- Update stale goals promptly. Stale active goals pollute session-start context.\n"
         "- Be honest about confidence. 0.7 is a reasonable default — don't inflate to 0.9.\n"
-        "- Don't retrieve just to show you can — only when it would change your response."
+        "- Don't retrieve just to show you can — only when it would change your response.\n"
+        "- Don't over-journal — skip transient, obvious, or easily re-discoverable facts.\n"
+        "- If you form a conclusion during conversation, argue it. The graph needs claims to reason over.\n"
+        "- Entity properties are for stable identity; observations are for everything you learn. Don't cram."
     )
 
     if sections:
