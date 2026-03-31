@@ -389,7 +389,7 @@ def retrieve_session_context() -> Optional[str]:
         "- Is it a risk or opportunity? → **mindgraph_action**\n"
         "- Is it a plan, task, or policy? → **mindgraph_plan**\n"
         "- Is it a question, hypothesis, or anomaly? → **mindgraph_inquire**\n"
-        "- Is it a person, org, place, or concept? → **mindgraph_capture**(entity)\n"
+        "- Is it a person, org, nation, place, event, or concept? → **mindgraph_capture**(entity) — each type creates a distinct node\n"
         "- Is it a factual observation about the world? → **mindgraph_capture**(observation)\n"
         "- Is it a long document, article, or transcript? → **mindgraph_ingest**\n"
         "- Is it a preference, note, insight, or reflection? → **mindgraph_journal**\n"
@@ -422,11 +422,15 @@ def retrieve_session_context() -> Optional[str]:
         "Use when a real choice point exists with distinct options to weigh.\n\n"
         #
         "**mindgraph_capture** — Reality layer entities and facts\n"
-        "entity: people, orgs, concepts, places, events, works. Deduplicates — safe to call repeatedly.\n"
+        "entity: each entity_type creates a distinct node type with its own properties:\n"
+        "  person (occupation, nationality, birth_date), organization (domain, description), "
+        "nation (description), place (description), event (description), concept (domain, description), "
+        "work, other.\n"
         "observation: factual observations about the world.\n"
         "concept: abstract theories, frameworks, patterns (Epistemic layer).\n"
-        "For people: entity for stable identity only (name, role, org). Use separate observations "
-        "for what you learned about them — enables relevance-based retrieval.\n\n"
+        "For people: use entity_type='person' with props like occupation, nationality. "
+        "For their company: entity_type='organization'. "
+        "Keep entity nodes for stable identity — use separate observations for what you learned about them.\n\n"
         #
         "**mindgraph_inquire** — questions, hypotheses, anomalies\n"
         "question: open questions worth tracking (surfaces at session start).\n"
@@ -462,8 +466,9 @@ def retrieve_session_context() -> Optional[str]:
         "- **Learning something new:** ingest → argue key conclusions → journal insights → commit goals\n"
         "- **Making a decision:** retrieve context → argue reasoning → commit decision → journal what was rejected\n"
         "- **Completing a goal:** retrieve goals → commit status=completed → journal lessons learned\n"
-        "- **Researching a person:** capture entity (identity only) → multiple capture observations → "
-        "capture org entity → plan create_task for follow-up\n\n"
+        "- **Researching a person:** capture(entity_type='person', props={occupation, nationality}) → "
+        "capture(entity_type='organization') for their company → multiple capture(observation) for findings → "
+        "plan create_task for follow-up\n\n"
         #
         # ── Judgment calls & pitfalls ──
         #
