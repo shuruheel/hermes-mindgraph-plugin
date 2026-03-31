@@ -306,6 +306,108 @@ class TestAccumulateMessages:
 # Tools module
 # ---------------------------------------------------------------------------
 
+class TestCaptureTypedRouting:
+    """Test that mindgraph_capture routes to typed SDK methods."""
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_person_routes_to_find_or_create_person(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_person.return_value = {"uid": "p1", "label": "Alice"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture("Alice", capture_type="entity", entity_type="person"))
+        assert result["success"] is True
+        client.find_or_create_person.assert_called_once_with("Alice", props=None)
+        client.find_or_create_entity.assert_not_called()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_organization_routes_to_typed_method(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_organization.return_value = {"uid": "o1", "label": "Acme"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture("Acme", capture_type="entity", entity_type="organization"))
+        assert result["success"] is True
+        client.find_or_create_organization.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_nation_routes_to_typed_method(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_nation.return_value = {"uid": "n1", "label": "Japan"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture("Japan", capture_type="entity", entity_type="nation"))
+        assert result["success"] is True
+        client.find_or_create_nation.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_concept_routes_to_typed_method(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_concept.return_value = {"uid": "c1", "label": "Entropy"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture("Entropy", capture_type="entity", entity_type="concept"))
+        assert result["success"] is True
+        client.find_or_create_concept.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_work_falls_back_to_generic(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_entity.return_value = {"uid": "w1", "label": "Hamlet"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture("Hamlet", capture_type="entity", entity_type="work"))
+        assert result["success"] is True
+        client.find_or_create_entity.assert_called_once_with("Hamlet", props={"entity_type": "work"})
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_properties_passed_to_typed_method(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        client.find_or_create_person.return_value = {"uid": "p2", "label": "Bob"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_capture(
+            "Bob", capture_type="entity", entity_type="person",
+            properties={"role": "engineer", "company": "Acme"},
+        ))
+        assert result["success"] is True
+        client.find_or_create_person.assert_called_once_with(
+            "Bob", props={"role": "engineer", "company": "Acme"},
+        )
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_all_typed_methods_covered(self, mock_get):
+        """Ensure all 6 typed entity types route to their specific method."""
+        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        import json
+        client = MagicMock()
+        mock_get.return_value = client
+
+        for etype, method in [
+            ("person", "find_or_create_person"),
+            ("organization", "find_or_create_organization"),
+            ("nation", "find_or_create_nation"),
+            ("event", "find_or_create_event"),
+            ("place", "find_or_create_place"),
+            ("concept", "find_or_create_concept"),
+        ]:
+            getattr(client, method).return_value = {"uid": "x", "label": "test"}
+            mindgraph_capture("test", capture_type="entity", entity_type=etype)
+            getattr(client, method).assert_called()
+
+
 class TestToolsModule:
 
     def test_all_tools_have_required_keys(self):

@@ -958,26 +958,45 @@ def mindgraph_capture(
     """Capture facts in the Reality layer — entities, observations, and concepts.
 
     capture_type:
-      - entity: A concrete thing (person, org, concept, place, event, work). Creates/finds via dedup.
+      - entity: A concrete thing — each entity_type creates a distinct node type with its
+        own properties and edge types in the graph. Uses deduplication — safe to call repeatedly.
       - observation: A factual observation about the world — something noticed or reported.
       - concept: An abstract concept in the Epistemic layer (via structure endpoint).
 
-    entity_type (entity only): concept, person, organization, place, event, work, other
-    properties: additional properties dict
+    entity_type (entity only): concept, person, organization, nation, place, event, work, other
+    properties: additional properties dict (type-specific props passed to the server)
     """
     if not label or not label.strip():
         return _json_response(False, error="Label is required")
 
     if capture_type == "entity":
-        props = {"entity_type": entity_type}
+        props = {}
         if properties and isinstance(properties, dict):
             props.update(properties)
-        result, err = _safe_call(
-            lambda c: c.find_or_create_entity(label, props=props),
-        )
+
+        # Route to typed SDK methods for proper node type creation
+        _typed_creators = {
+            "person": "find_or_create_person",
+            "organization": "find_or_create_organization",
+            "nation": "find_or_create_nation",
+            "event": "find_or_create_event",
+            "place": "find_or_create_place",
+            "concept": "find_or_create_concept",
+        }
+        creator_method = _typed_creators.get(entity_type)
+        if creator_method:
+            result, err = _safe_call(
+                lambda c, m=creator_method, p=props: getattr(c, m)(label, props=p if p else None),
+            )
+        else:
+            # "work", "other", or unrecognized — fall back to generic with entity_type in props
+            props["entity_type"] = entity_type
+            result, err = _safe_call(
+                lambda c: c.find_or_create_entity(label, props=props),
+            )
         if err:
             return _json_response(False, error=f"Entity creation failed: {err}")
-        return _json_response(True, data={"result": result, "message": f"Entity: {label}"})
+        return _json_response(True, data={"result": result, "message": f"Entity ({entity_type}): {label}"})
 
     elif capture_type == "observation":
         kwargs = {"action": "observation", "label": label}
@@ -1631,7 +1650,7 @@ MINDGRAPH_CAPTURE_SCHEMA = {
             },
             "entity_type": {
                 "type": "string",
-                "enum": ["concept", "person", "organization", "place", "event", "work", "other"],
+                "enum": ["concept", "person", "organization", "nation", "place", "event", "work", "other"],
                 "description": "(entity only) Type of entity. Default: concept.",
             },
             "properties": {
