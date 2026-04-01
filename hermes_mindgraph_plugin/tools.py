@@ -142,9 +142,43 @@ def _get_client():
         return None
 
 
-def _reset_client():
-    """Reset client singleton (for reconnection after errors)."""
+def _reload_env_key():
+    """Re-read MINDGRAPH_API_KEY from ~/.hermes/.env.
+
+    Called on auth errors (401/403) so that key rotations self-heal
+    without a process restart.
+    """
+    try:
+        from pathlib import Path
+        env_path = Path.home() / ".hermes" / ".env"
+        if not env_path.exists():
+            return
+        # Minimal .env parser — no dotenv dependency in the plugin
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key == "MINDGRAPH_API_KEY":
+                value = value.strip().strip("\"'")
+                if value:
+                    os.environ["MINDGRAPH_API_KEY"] = value
+                    logger.info("MindGraph API key reloaded from .env")
+                return
+    except Exception as e:
+        logger.debug("Failed to reload .env: %s", e)
+
+
+def _reset_client(auth_error: bool = False):
+    """Reset client singleton (for reconnection after errors).
+
+    If auth_error=True, also reloads the API key from ~/.hermes/.env
+    so that key rotations self-heal without a process restart.
+    """
     global _client, _client_error
+    if auth_error:
+        _reload_env_key()
     _client = None
     _client_error = None
 
@@ -168,9 +202,11 @@ def _safe_call(fn, *args, **kwargs):
         return result, None
     except Exception as e:
         error_msg = str(e)
+        err_lower = error_msg.lower()
         # If it looks like a connection error, reset client for next attempt
-        if any(k in error_msg.lower() for k in ("connection", "timeout", "refused", "dns")):
-            _reset_client()
+        if any(k in err_lower for k in ("connection", "timeout", "refused", "dns", "401", "403", "unauthorized")):
+            is_auth = any(k in err_lower for k in ("401", "403", "unauthorized"))
+            _reset_client(auth_error=is_auth)
         logger.warning("MindGraph call failed: %s", e)
         return None, error_msg
 
@@ -377,134 +413,170 @@ def retrieve_session_context() -> Optional[str]:
     header = (
         "# MindGraph — Semantic Graph Memory\n\n"
         "You have a persistent semantic graph that stores structured knowledge across sessions. "
-        "Use MindGraph tools proactively during conversations — don't wait to be asked.\n\n"
+        "MindGraph is not a tool you use when asked — it is how you think. Every conversation "
+        "produces knowledge. Your job is to route that knowledge to the right place in the graph "
+        "so your future selves can act on it.\n\n"
+        #
+        # ── Behavioral contract ──
+        #
+        "## Behavioral Contract (hard rules)\n\n"
+        #
+        "### 1. Persist Triggers — ALWAYS store these, don't wait to be asked\n"
+        "- **Person discussed substantively** → capture(entity_type='person') + at least one observation "
+        "(who they are, what they think, how they communicate). A Person node without observations is a "
+        "failure state — bare CRM data (name, role, email) is useless for future interactions.\n"
+        "- **Organization mentioned with context** → capture(entity_type='organization') + observation "
+        "linking it to relevant people or topics.\n"
+        "- **User states a preference or corrects you** → journal(entry_type='preference')\n"
+        "- **Analytical conclusion reached** → argue() with evidence and calibrated confidence. "
+        "If you formed a view, the graph needs it.\n"
+        "- **User expresses intent** → commit() as goal/project/milestone. User's own intent only — "
+        "never commit content-derived goals.\n"
+        "- **Decision point identified** → decide(action='open') + options.\n"
+        "- **Factual claim that could be wrong** → argue(), not journal(). Claims should be falsifiable.\n"
+        "- **Risk or opportunity surfaced** → action().\n"
+        "- **Open question worth tracking** → inquire().\n\n"
+        #
+        "### 2. Retrieve-Before-Act — ALWAYS retrieve before acting on stored knowledge\n"
+        "- **Before drafting any communication about/to a person** → retrieve(query='[person name]'). "
+        "Draft from retrieved context, not session memory. This is what makes your next session as good as this one.\n"
+        "- **Before making recommendations involving a person or org** → retrieve() first.\n"
+        "- **When user references someone discussed before** → retrieve() before responding.\n"
+        "- **When user says 'remember when...' or 'what did we...'** → retrieve() before saying you don't know.\n"
+        "- **If retrieve returns nothing for someone you supposedly researched** → something broke. "
+        "Flag it, don't proceed on session memory alone.\n\n"
+        #
+        "### 3. Research Loop (any time you research a person, not just outreach)\n"
+        "Research → Persist → Retrieve → Act. Each step gates the next.\n"
+        "1. Research: gather substantive sources (blog, talks, papers, interviews)\n"
+        "2. Persist: store Person entity + observations (intellectual profile, communication style, "
+        "technical positions, hook/relevance rationale). Do NOT proceed until these are in MindGraph.\n"
+        "3. Retrieve: query MindGraph for what you just stored + any prior context. "
+        "Use the RETRIEVED context to act.\n"
+        "4. Act: draft email, make recommendation, update user — grounded in graph, not session memory.\n\n"
         #
         # ── Decision tree ──
         #
         "## Which Tool? (decision tree)\n"
         "Something worth remembering?\n"
-        "- Is it a belief, conclusion, or position that could be wrong? → **mindgraph_argue**\n"
-        "- Is it a goal, project, or milestone? → **mindgraph_commit**\n"
-        "- Is it a choice point with options? → **mindgraph_decide**\n"
-        "- Is it a risk or opportunity? → **mindgraph_action**\n"
-        "- Is it a plan, task, or policy? → **mindgraph_plan**\n"
-        "- Is it a question, hypothesis, or anomaly? → **mindgraph_inquire**\n"
-        "- Is it a person, org, nation, place, event, or concept? → **mindgraph_capture**(entity) — each type creates a distinct node\n"
-        "- Is it a factual observation about the world? → **mindgraph_capture**(observation)\n"
-        "- Is it a long document, article, or transcript? → **mindgraph_ingest**\n"
-        "- Is it a preference, note, insight, or reflection? → **mindgraph_journal**\n"
-        "- Need to find something in the graph? → **mindgraph_retrieve**\n\n"
+        "- Belief, conclusion, or position that could be wrong? → **argue**\n"
+        "- Goal, project, or milestone? → **commit**\n"
+        "- Choice point with options? → **decide**\n"
+        "- Risk or opportunity? → **action**\n"
+        "- Plan, task, or policy? → **plan**\n"
+        "- Question, hypothesis, or anomaly? → **inquire**\n"
+        "- Person, org, nation, place, event, or concept? → **capture**(entity) — each type creates a distinct node\n"
+        "- Factual observation about the world? → **capture**(observation)\n"
+        "- Long document, article, or transcript? → **ingest**\n"
+        "- Preference, note, insight, or reflection? → **journal**\n"
+        "- Need to find something? → **retrieve**\n\n"
         #
-        # ── Tool-by-tool patterns ──
+        # ── Tool patterns ──
         #
         "## Tool Patterns\n\n"
         #
-        "**mindgraph_journal** — low-friction capture (default when unsure)\n"
+        "**journal** — low-friction capture (default when genuinely unsure)\n"
         "Entry types: observation (factual, default), preference (likes/dislikes), "
         "note (general), reflection (meta/process), insight (connections/patterns).\n"
-        "Use for: user preferences, environmental observations, session insights, patterns noticed.\n"
-        "Anti-pattern: Don't journal things that are really claims → use argue. "
-        "Don't journal goals → use commit.\n\n"
+        "Anti-pattern: Don't journal claims → argue. Don't journal goals → commit. "
+        "Don't journal entity facts → capture(observation).\n\n"
         #
-        "**mindgraph_argue** — structured epistemic claims\n"
-        "Use for: technical conclusions, analytical positions, predictions, assessments, disagreements.\n"
-        "Confidence calibration: 0.9-1.0 near-certain/verified; 0.7-0.8 confident/good evidence (default 0.7); "
-        "0.5-0.6 plausible/uncertain; 0.3-0.4 speculative; 0.1-0.2 intuition only.\n"
-        "Anti-pattern: Don't argue observations ('sky is blue') or preferences. Claims should be falsifiable.\n\n"
+        "**argue** — structured epistemic claims\n"
+        "Confidence: 0.9+ near-certain; 0.7-0.8 confident (default 0.7); "
+        "0.5-0.6 uncertain; 0.3-0.4 speculative; 0.1-0.2 intuition.\n"
+        "Anti-pattern: Don't argue bare observations or preferences. Claims should be falsifiable.\n\n"
         #
-        "**mindgraph_commit** — goals, projects, milestones\n"
-        "Types: goal (something to achieve), project (ongoing work), milestone (checkpoint).\n"
-        "Status: active → completed/paused/abandoned. Don't auto-complete goals — let user confirm.\n"
-        "Anti-pattern: Don't commit observations or beliefs. Commits represent intent and agency. "
-        "User's own intent only — never commit content-derived goals.\n\n"
+        "**commit** — goals, projects, milestones\n"
+        "Status: active → completed/paused/abandoned. Don't auto-complete — let user confirm.\n"
+        "Anti-pattern: Commits represent user intent and agency. Never commit content-derived goals.\n\n"
         #
-        "**mindgraph_decide** — decisions with deliberation tracking\n"
-        "Actions: open (new decision) → add_option (alternatives) → resolve (choose one).\n"
-        "Use when a real choice point exists with distinct options to weigh.\n\n"
+        "**decide** — decisions with deliberation\n"
+        "Actions: open → add_option → add_constraint → resolve.\n\n"
         #
-        "**mindgraph_capture** — Reality layer entities and facts\n"
-        "Each entity_type creates a DISTINCT node type with its own properties and edge types:\n"
+        "**capture** — Reality layer entities and facts\n"
+        "Entity types (each creates a DISTINCT typed node):\n"
         "  person: occupation, nationality, birth_date, death_date, identifiers, attributes\n"
         "  organization: domain, description\n"
-        "  nation: description\n"
-        "  place: description\n"
-        "  event: description\n"
+        "  nation, place, event: description\n"
         "  concept: domain, description\n"
-        "  work, other: generic Entity fallback\n"
-        "Also: observation (factual observations), concept (abstract theories/frameworks via Epistemic layer).\n"
-        "Entity nodes are for stable identity — use separate observation nodes for what you learn about them. "
-        "This enables relevance-based retrieval: different observations surface in different contexts.\n\n"
+        "  work, other: generic fallback\n"
+        "Also: capture_type='observation' for factual observations.\n"
+        "KEY PRINCIPLE: Entity nodes are for stable identity. Observations are for everything you learn "
+        "ABOUT them. This separation enables relevance-based retrieval — different observations surface "
+        "in different contexts. Don't cram findings into entity properties.\n\n"
         #
-        "**mindgraph_inquire** — questions, hypotheses, anomalies\n"
-        "question: open questions worth tracking (surfaces at session start).\n"
-        "hypothesis: testable conjectures.\n"
-        "anomaly: things that don't fit existing models — worth investigating.\n\n"
+        "**inquire** — questions, hypotheses, anomalies\n"
+        "question: open questions (surface at session start). hypothesis: testable conjectures. "
+        "anomaly: things that don't fit.\n\n"
         #
-        "**mindgraph_action** — risks and affordances\n"
-        "assess_risk: risks, threats, failure modes.\n"
-        "add_affordance: capabilities, leverage points, opportunities enabled by current state.\n\n"
+        "**action** — risks and affordances\n"
+        "assess_risk: threats, failure modes. add_affordance: capabilities, leverage points, opportunities.\n\n"
         #
-        "**mindgraph_plan** — plans, tasks, execution, governance\n"
+        "**plan** — plans, tasks, execution, governance\n"
         "Planning: create_plan, create_task, add_step, update_status, get_plan.\n"
         "Execution: start → complete/fail.\n"
         "Governance: create_policy (rules/constraints the agent should follow).\n\n"
         #
-        "**mindgraph_ingest** — long-form content\n"
-        "Under 500 chars: sync. Over 500 chars: async (returns job_id).\n"
-        "Use for articles, papers, documentation, code, transcripts.\n"
+        "**ingest** — long-form content\n"
+        "Under 500 chars: sync. Over 500 chars: async.\n"
         "Anti-pattern: Don't ingest trivial content or duplicates.\n\n"
         #
-        "**mindgraph_retrieve** — querying the graph\n"
+        "**retrieve** — querying the graph\n"
         "Modes: search (hybrid BM25+vector, default), goals, questions, decisions, "
-        "context (deep connected retrieval), neighborhood (explore from a node), "
-        "weak_claims, contradictions.\n"
-        "Basic topic-relevant context is already injected automatically each turn — "
-        "use retrieve for deeper/specific queries.\n"
-        "Triggers: user says 'remember when...' → search first. Planning session → retrieve goals. "
-        "User seems stuck → retrieve decisions and context.\n\n"
+        "context (deep connected), neighborhood (from a node), weak_claims, contradictions.\n"
+        "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n\n"
         #
-        # ── Building a social graph ──
+        # ── Social graph ──
         #
-        "## Building a Social Graph\n"
-        "Proactively build a living social graph from conversations. Whenever you encounter a person, "
-        "organization, nation, or event worth remembering, create typed entity nodes and link them "
-        "with observations.\n\n"
+        "## Building a Social Graph\n\n"
+        "Every conversation should contribute to a living social graph. This is not optional "
+        "and not limited to specific workflows — it's how the graph becomes genuinely useful.\n\n"
         "Pattern:\n"
         "1. capture(entity_type='person', props={occupation, nationality}) — typed Person node\n"
         "2. capture(entity_type='organization') — their company/institution\n"
-        "3. capture(observation) per distinct fact — 'Alice leads memory team at DeepMind', "
-        "'DeepMind is a subsidiary of Google'. Each observation links entities in the graph.\n"
-        "4. argue() when you form a view — 'Alice would be a strong collaborator because...' "
-        "with evidence and confidence. Makes reasoning queryable and revisable.\n\n"
-        "The bar for creating nodes: 'would I want to retrieve this in a future conversation?' "
-        "If yes, create the node. Don't create nodes for every name dropped in passing.\n\n"
-        "This makes the graph queryable: 'who do we know at AI labs?', 'what organizations work on "
-        "knowledge graphs?', 'what's the relationship between X and Y?' — all become retrieval queries.\n\n"
+        "3. capture(observation) per distinct insight — one observation per fact, not a dump:\n"
+        "   - Intellectual profile: what they think about, their core frames\n"
+        "   - Communication style: formal/informal, academic/practitioner, contrarian/consensus\n"
+        "   - Technical positions: specific claims they've taken\n"
+        "   - Career arc: trajectory, pivots (if notable)\n"
+        "   - Relationships: 'X co-founded Y', 'X worked at Z before joining W'\n"
+        "4. argue() when you form a view — 'X would be a strong collaborator because...' "
+        "with evidence and confidence\n\n"
+        "The bar: 'would I want to retrieve this in a future conversation?' If yes, create the node.\n\n"
         #
         # ── Compound patterns ──
         #
         "## Compound Patterns\n"
-        "- **Learning something new:** ingest → argue key conclusions → journal insights → commit goals\n"
-        "- **Making a decision:** retrieve context → argue reasoning → commit decision → journal what was rejected\n"
-        "- **Completing a goal:** retrieve goals → commit status=completed → journal lessons learned\n"
-        "- **Researching a person:** capture(entity_type='person', props={occupation, nationality}) → "
-        "capture(entity_type='organization') for their company → multiple capture(observation) for findings → "
-        "argue(claim about their relevance/fit) → plan create_task for follow-up\n"
-        "- **Starting a new session:** session-start context is auto-injected. "
-        "Retrieve anything specific to the user's first message before proceeding.\n\n"
+        "- **Learning:** ingest → argue key conclusions → journal insights → commit goals\n"
+        "- **Deciding:** retrieve context → argue reasoning → decide → journal what was rejected\n"
+        "- **Completing a goal:** retrieve goals → commit status=completed → journal lessons\n"
+        "- **Researching a person:** capture(person) → capture(org) → multiple observations → "
+        "argue(relevance) → plan(follow-up)\n"
+        "- **New session:** session-start context is auto-injected. "
+        "Retrieve specifics before proceeding.\n\n"
         #
-        # ── Judgment calls & pitfalls ──
+        # ── Anti-patterns ──
+        #
+        "## Anti-Patterns\n"
+        "- **Bare entity nodes**: A Person with name and email but no observations is useless. "
+        "Always pair with at least one qualitative observation.\n"
+        "- **Session-memory drafting**: Never draft communications from what you researched "
+        "'5 minutes ago' — retrieve from graph. Session memory dies; graph persists.\n"
+        "- **Over-journaling**: Skip transient, obvious, or easily re-discovered facts.\n"
+        "- **Under-arguing**: If you formed a conclusion, argue it. The graph needs claims to reason over.\n"
+        "- **Confidence inflation**: 0.7 is a good default. Don't inflate to 0.9 without strong evidence.\n"
+        "- **Stale goals**: Update promptly. Stale active goals pollute session-start context.\n"
+        "- **Content-derived commits**: Don't create goals from articles or research. Only user intent.\n"
+        "- **Cramming**: Entity properties = stable identity. Observations = everything else.\n"
+        "- **Performative retrieval**: Don't retrieve to show you can — only when it would change your response.\n\n"
+        #
+        # ── Judgment calls ──
         #
         "## Judgment Calls\n"
-        "- During coding/execution sessions, writing is less common. During planning, research, "
-        "or reflective conversations, write more.\n"
-        "- Post-session extraction runs automatically — focus on high-signal items, not exhaustive capture.\n"
-        "- Update stale goals promptly. Stale active goals pollute session-start context.\n"
-        "- Be honest about confidence. 0.7 is a reasonable default — don't inflate to 0.9.\n"
-        "- Don't retrieve just to show you can — only when it would change your response.\n"
-        "- Don't over-journal — skip transient, obvious, or easily re-discoverable facts.\n"
-        "- If you form a conclusion during conversation, argue it. The graph needs claims to reason over.\n"
-        "- Entity properties are for stable identity; observations are for everything you learn. Don't cram."
+        "- During coding/execution, persistence is less frequent. During planning, research, "
+        "or reflective conversations, persist more.\n"
+        "- Post-session extraction runs automatically — focus on high-signal items during session.\n"
+        "- When in doubt between journal and argue: is this falsifiable? If yes → argue. If no → journal."
     )
 
     if sections:
