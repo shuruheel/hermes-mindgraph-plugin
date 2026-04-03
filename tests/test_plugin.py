@@ -223,13 +223,22 @@ class TestHandleToolCall:
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_dispatches_retrieve(self, mock_get, provider):
         client = MagicMock()
-        client.hybrid_search.return_value = [{"node": {"uid": "n1", "label": "test"}, "score": 0.9}]
+        # _fts_search prefers client.search() — mock enriched FTS response
+        client.search.return_value = {
+            "results": [{"uid": "n1", "label": "test", "node_type": "Concept"}],
+            "edges": [],
+            "chunks": [],
+        }
         mock_get.return_value = client
 
         result = json.loads(provider.handle_tool_call(
             "mindgraph_retrieve", {"query": "test", "mode": "search"},
         ))
         assert result["success"] is True
+        assert result["data"]["count"] == 1
+        assert result["data"]["results"][0]["uid"] == "n1"
+        # Verify search was called (not hybrid_search or _request)
+        client.search.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +658,122 @@ class TestCommitDedup:
 
 
 # ---------------------------------------------------------------------------
+# Fuzzy dedup
+# ---------------------------------------------------------------------------
+
+class TestFuzzyDedup:
+    """Test fuzzy label matching in mindgraph_commit dedup."""
+
+    def test_normalize_label(self):
+        from hermes_mindgraph_plugin.tools import _normalize_label
+        assert _normalize_label("Ship v2.0") == "ship version 2 0"
+        assert _normalize_label("Ship version 2.0") == "ship version 2 0"
+        assert _normalize_label("  Hello   World  ") == "hello world"
+        assert _normalize_label("ver.3 release") == "version 3 release"
+
+    def test_label_similarity_identical(self):
+        from hermes_mindgraph_plugin.tools import _label_similarity
+        assert _label_similarity("Ship v2", "Ship v2") == 1.0
+
+    def test_label_similarity_abbreviation(self):
+        from hermes_mindgraph_plugin.tools import _label_similarity
+        score = _label_similarity("Ship v2", "Ship version 2")
+        assert score > 0.85  # Should be a strong match after normalization
+
+    def test_label_similarity_dissimilar(self):
+        from hermes_mindgraph_plugin.tools import _label_similarity
+        score = _label_similarity("Ship v2", "Hire new engineer")
+        assert score < 0.5
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_fuzzy_dedup_catches_abbreviation(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_commit
+        client = MagicMock()
+        # Existing node uses full form
+        client.search.return_value = [
+            {"uid": "goal-1", "label": "Ship version 2.0", "props": {"status": "active"}},
+        ]
+        mock_get.return_value = client
+
+        # Commit uses abbreviated form
+        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        assert result["success"] is True
+        assert result["data"]["deduplicated"] is True
+        assert result["data"]["uid"] == "goal-1"
+        assert "fuzzy" in result["data"]["message"]
+        client.commit.assert_not_called()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_fuzzy_dedup_rejects_low_similarity(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_commit
+        client = MagicMock()
+        client.search.return_value = [
+            {"uid": "goal-1", "label": "Ship alpha release", "props": {"status": "active"}},
+        ]
+        client.commit.return_value = {"uid": "new-1", "label": "Ship v2.0"}
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        assert result["success"] is True
+        # Should create new — not dedup against a dissimilar label
+        assert "deduplicated" not in result.get("data", {})
+        client.commit.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_fuzzy_prefers_exact_over_fuzzy(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_commit
+        client = MagicMock()
+        # Both an exact match and a fuzzy match exist
+        client.search.return_value = [
+            {"uid": "goal-fuzzy", "label": "Ship version 2.0", "props": {"status": "active"}},
+            {"uid": "goal-exact", "label": "Ship v2.0", "props": {"status": "active"}},
+        ]
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        assert result["success"] is True
+        assert result["data"]["deduplicated"] is True
+        # Should pick the exact match
+        assert result["data"]["uid"] == "goal-exact"
+        assert "exact" in result["data"]["message"]
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_fuzzy_disabled_at_threshold_1(self, mock_get):
+        """Setting threshold to 1.0 effectively disables fuzzy matching."""
+        from hermes_mindgraph_plugin.tools import mindgraph_commit
+        client = MagicMock()
+        client.search.return_value = [
+            {"uid": "goal-1", "label": "Ship version 2.0", "props": {"status": "active"}},
+        ]
+        client.commit.return_value = {"uid": "new-1", "label": "Ship v2.0"}
+        mock_get.return_value = client
+
+        with patch("hermes_mindgraph_plugin.tools.DEDUP_FUZZY_THRESHOLD", 1.0):
+            result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+
+        # No exact match and fuzzy disabled → create new
+        assert result["success"] is True
+        assert "deduplicated" not in result.get("data", {})
+        client.commit.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_fuzzy_dedup_updates_status(self, mock_get):
+        from hermes_mindgraph_plugin.tools import mindgraph_commit
+        client = MagicMock()
+        client.search.return_value = [
+            {"uid": "goal-1", "label": "Ship version 2.0", "props": {"status": "active"}},
+        ]
+        mock_get.return_value = client
+
+        result = json.loads(mindgraph_commit(
+            label="Ship v2.0", commit_type="goal", status="completed",
+        ))
+        assert result["success"] is True
+        assert result["data"]["deduplicated"] is True
+        client.update_node.assert_called_once_with("goal-1", status="completed")
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -658,8 +783,6 @@ class TestConfiguration:
     def test_default_config_values(self):
         import hermes_mindgraph_plugin.tools as tools
         # These should have sensible defaults
-        assert tools.SCORE_THRESHOLD == 0.55
-        assert tools.MIN_CHUNK_SCORE == 0.5
         assert tools.PRE_COMPRESS_LIMIT == 4000
         assert tools.PROACTIVE_K == 5
         assert tools.PROACTIVE_RETRIEVAL_ENABLED is True

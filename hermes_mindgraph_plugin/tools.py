@@ -27,6 +27,8 @@ Only depends on mindgraph-sdk (the `mindgraph` package) and Python stdlib.
 import json
 import logging
 import os
+import re
+from difflib import SequenceMatcher
 
 import threading
 from typing import Optional
@@ -67,10 +69,11 @@ def _env_bool(key: str, default: bool) -> bool:
     return val.lower() in ("true", "1", "yes")
 
 # Proactive retrieval settings
-SCORE_THRESHOLD = _env_float("MINDGRAPH_SCORE_THRESHOLD", 0.55)
-MIN_CHUNK_SCORE = _env_float("MINDGRAPH_MIN_CHUNK_SCORE", 0.5)
 PROACTIVE_RETRIEVAL_ENABLED = _env_bool("MINDGRAPH_PROACTIVE_RETRIEVAL", True)
 PROACTIVE_K = _env_int("MINDGRAPH_PROACTIVE_K", 5)
+
+# Dedup settings
+DEDUP_FUZZY_THRESHOLD = _env_float("MINDGRAPH_DEDUP_FUZZY_THRESHOLD", 0.85)
 
 # Pre-compression settings
 PRE_COMPRESS_LIMIT = _env_int("MINDGRAPH_PRE_COMPRESS_LIMIT", 4000)
@@ -225,24 +228,63 @@ def _fts_search(client, query, limit=None, node_type=None,
                 include_edges=False, include_chunks=False):
     """FTS search via POST /search with optional edges and chunks.
 
-    The SDK's search() has a fixed signature that doesn't expose
-    include_edges / include_chunks (added in server v0.5+).
-    This wrapper calls _request directly to pass those params.
+    Tries the public SDK search() first with enrichment params.
+    Falls back to client._request() for older SDK versions that don't
+    accept include_edges/include_chunks kwargs.
 
     Response shape:
       - Old server / no flags: flat list of node dicts
       - New server + flags:    {"results": [...], "edges": [...], "chunks": [...]}
     """
-    params = {"query": query}
+    kwargs = {}
     if limit is not None:
-        params["limit"] = limit
+        kwargs["limit"] = limit
     if node_type:
-        params["node_type"] = node_type
+        kwargs["node_type"] = node_type
     if include_edges:
-        params["include_edges"] = True
+        kwargs["include_edges"] = True
     if include_chunks:
-        params["include_chunks"] = True
-    return client._request("POST", "/search", params)
+        kwargs["include_chunks"] = True
+
+    # Prefer public SDK method — passes enrichment params if SDK supports them
+    try:
+        return client.search(query, **kwargs)
+    except TypeError:
+        # SDK's search() doesn't accept include_edges/include_chunks yet —
+        # fall back to raw request (will break if SDK removes _request)
+        params = {"query": query}
+        params.update(kwargs)
+        return client._request("POST", "/search", params)
+
+
+def _normalize_label(text: str) -> str:
+    """Normalize a label for fuzzy comparison.
+
+    Lowercases, strips, collapses whitespace, removes punctuation,
+    and expands common abbreviations so "Ship v2.0" and "Ship version 2"
+    compare as near-identical.
+    """
+    s = text.strip().lower()
+    # Expand common abbreviations before stripping punctuation
+    s = re.sub(r"\bv(\d)", r"version \1", s)
+    s = re.sub(r"\bver\.?\s*(\d)", r"version \1", s)
+    # Remove punctuation (keep alphanumeric and spaces)
+    s = re.sub(r"[^\w\s]", " ", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _label_similarity(a: str, b: str) -> float:
+    """Compute similarity between two labels after normalization.
+
+    Returns a float 0.0–1.0. Uses SequenceMatcher (stdlib, no dependencies).
+    """
+    na = _normalize_label(a)
+    nb = _normalize_label(b)
+    if na == nb:
+        return 1.0
+    return SequenceMatcher(None, na, nb).ratio()
 
 
 def _safe_call(fn, *args, **kwargs):
@@ -495,11 +537,16 @@ def retrieve_session_context() -> Optional[str]:
         "- **Open question worth tracking** → inquire().\n\n"
         #
         "### 2. Retrieve-Before-Act — ALWAYS retrieve before acting on stored knowledge\n"
-        "- **Before drafting any communication about/to a person** → retrieve(query='[person name]'). "
-        "Draft from retrieved context, not session memory. This is what makes your next session as good as this one.\n"
+        "Retrieval uses full-text search (keyword matching, not semantic). Write queries as "
+        "keywords and names, not natural-language questions.\n"
+        "- **Before drafting any communication about/to a person** → retrieve(query='Alice Smith'). "
+        "Draft from retrieved context, not session memory.\n"
         "- **Before making recommendations involving a person or org** → retrieve() first.\n"
         "- **When user references someone discussed before** → retrieve() before responding.\n"
-        "- **When user says 'remember when...' or 'what did we...'** → retrieve() before saying you don't know.\n"
+        "- **When user says 'remember when...' or 'what did we...'** → retrieve() with key terms, "
+        "not the full question.\n"
+        "- **Broaden on miss**: If retrieve returns nothing, try synonyms, related terms, or "
+        "node_type filter. FTS matches exact words — rephrase if needed.\n"
         "- **If retrieve returns nothing for someone you supposedly researched** → something broke. "
         "Flag it, don't proceed on session memory alone.\n\n"
         #
@@ -562,8 +609,8 @@ def retrieve_session_context() -> Optional[str]:
         "Also: capture_type='observation' for factual observations — pass entity_uid to link "
         "the observation to a specific entity (creates HAS_OBSERVATION edge).\n"
         "KEY PRINCIPLE: Entity nodes are for stable identity. Observations are for everything you learn "
-        "ABOUT them. This separation enables relevance-based retrieval — different observations surface "
-        "in different contexts. Don't cram findings into entity properties.\n\n"
+        "ABOUT them. Use descriptive keywords in observation labels — FTS retrieves by keyword match, "
+        "so clear terms make observations findable. Don't cram findings into entity properties.\n\n"
         #
         "**inquire** — questions, hypotheses, anomalies\n"
         "question: open questions (surface at session start). hypothesis: testable conjectures. "
@@ -581,10 +628,15 @@ def retrieve_session_context() -> Optional[str]:
         "Under 500 chars: sync. Over 500 chars: async.\n"
         "Anti-pattern: Don't ingest trivial content or duplicates.\n\n"
         #
-        "**retrieve** — querying the graph\n"
+        "**retrieve** — querying the graph (FTS-based)\n"
         "Modes: search (FTS, default — supports node_type filter, returns nodes + edges + chunks), "
         "goals, questions, decisions, neighborhood (from a node UID), weak_claims, contradictions.\n"
-        "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n\n"
+        "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n"
+        "**Query tips (FTS = keyword matching):**\n"
+        "  - Use names and key terms, not questions: 'Alice Smith AI safety' not 'what does Alice think about AI?'\n"
+        "  - Use node_type filter to narrow: retrieve(query='Smith', node_type='Person')\n"
+        "  - If no results, try fewer/broader keywords or drop qualifiers\n"
+        "  - Combine with neighborhood mode: search for a node, then explore its connections\n\n"
         #
         # ── Social graph ──
         #
@@ -975,6 +1027,9 @@ def mindgraph_commit(
         })
 
     # ── Client-side dedup: search for existing commitment with same label ──
+    # Two-pass: exact match first (cheap), then fuzzy match via normalized
+    # SequenceMatcher (catches "Ship v2" ≈ "Ship version 2.0").
+    # Threshold is configurable: MINDGRAPH_DEDUP_FUZZY_THRESHOLD (default 0.85).
     _node_type_map = {"goal": "Goal", "project": "Project", "milestone": "Milestone"}
     node_type = _node_type_map.get(commit_type)
 
@@ -982,36 +1037,58 @@ def mindgraph_commit(
         try:
             client = _get_client()
             if client:
-                existing = client.search(label, node_type=node_type, limit=5)
+                raw = _fts_search(client, label, node_type=node_type, limit=5)
+                # Normalize — _fts_search may return enriched dict or flat list
+                existing = raw.get("results", []) if isinstance(raw, dict) else raw
                 if isinstance(existing, list):
+                    # Pass 1: exact match (case-insensitive)
+                    match = None
+                    match_kind = ""
                     label_lower = label.strip().lower()
                     for node in existing:
                         existing_label = (node.get("label") or "").strip().lower()
                         if existing_label == label_lower:
-                            # Exact match — update status/description if changed
-                            node_uid = node.get("uid", "")
-                            existing_status = _get_prop(node, "status", "")
-                            needs_update = (
-                                (status and existing_status != status)
-                                or description
-                            )
-                            if needs_update and node_uid:
-                                update_kw = {}
-                                if status and existing_status != status:
-                                    update_kw["status"] = status
-                                if description:
-                                    update_kw["description"] = description
-                                try:
-                                    client.update_node(node_uid, **update_kw)
-                                    node.update(update_kw)
-                                except Exception as ue:
-                                    logger.debug("Dedup update failed (non-fatal): %s", ue)
-                            return _json_response(True, data={
-                                "result": node,
-                                "uid": node_uid,
-                                "message": f"Found existing {commit_type}: {label} (dedup)",
-                                "deduplicated": True,
-                            })
+                            match = node
+                            match_kind = "exact"
+                            break
+
+                    # Pass 2: fuzzy match if no exact hit
+                    if match is None and DEDUP_FUZZY_THRESHOLD < 1.0:
+                        best_score = 0.0
+                        for node in existing:
+                            existing_label = node.get("label") or ""
+                            if not existing_label:
+                                continue
+                            score = _label_similarity(label, existing_label)
+                            if score >= DEDUP_FUZZY_THRESHOLD and score > best_score:
+                                best_score = score
+                                match = node
+                                match_kind = f"fuzzy ({best_score:.0%})"
+
+                    if match is not None:
+                        node_uid = match.get("uid", "")
+                        existing_status = _get_prop(match, "status", "")
+                        needs_update = (
+                            (status and existing_status != status)
+                            or description
+                        )
+                        if needs_update and node_uid:
+                            update_kw = {}
+                            if status and existing_status != status:
+                                update_kw["status"] = status
+                            if description:
+                                update_kw["description"] = description
+                            try:
+                                client.update_node(node_uid, **update_kw)
+                                match.update(update_kw)
+                            except Exception as ue:
+                                logger.debug("Dedup update failed (non-fatal): %s", ue)
+                        return _json_response(True, data={
+                            "result": match,
+                            "uid": node_uid,
+                            "message": f"Found existing {commit_type}: {match.get('label', label)} ({match_kind} dedup)",
+                            "deduplicated": True,
+                        })
         except Exception:
             pass  # Fall through to create
 
@@ -1824,20 +1901,16 @@ MINDGRAPH_ARGUE_SCHEMA = {
 MINDGRAPH_COMMIT_SCHEMA = {
     "name": "mindgraph_commit",
     "description": (
-        "Record or update goals, projects, and milestones. Use for things that "
-        "represent intent and commitment — what the user wants to achieve, "
-        "projects being tracked. These are retrieved at session start to provide "
-        "continuity across conversations.\n\n"
-        "Deduplication: automatically finds existing commitments with the same label "
-        "instead of creating duplicates. Pass uid to update a specific commitment "
-        "(e.g., change status from active to completed)."
+        "Record or update goals, projects, and milestones. Provide label to create "
+        "or deduplicate; provide uid to update an existing commitment. At least one "
+        "of label or uid is required."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "label": {
                 "type": "string",
-                "description": "Name/description of the goal, project, or milestone.",
+                "description": "Name of the goal, project, or milestone. Required for new commitments.",
             },
             "commit_type": {
                 "type": "string",
@@ -1855,7 +1928,7 @@ MINDGRAPH_COMMIT_SCHEMA = {
             },
             "uid": {
                 "type": "string",
-                "description": "UID of existing commitment to update (e.g., change status). Retrieve UIDs via mindgraph_retrieve(mode='goals').",
+                "description": "UID of existing commitment to update. When provided, label is optional. Get UIDs from mindgraph_retrieve(mode='goals').",
             },
         },
         "required": [],
@@ -1865,26 +1938,18 @@ MINDGRAPH_COMMIT_SCHEMA = {
 MINDGRAPH_RETRIEVE_SCHEMA = {
     "name": "mindgraph_retrieve",
     "description": (
-        "Targeted search of the semantic graph memory. Basic context is automatically "
-        "injected each turn — use this tool when you need deeper, more specific, or "
-        "follow-up retrieval (e.g., a refined query, exploring a specific topic, or "
-        "checking structured nodes like goals/decisions). All modes use FTS or structured "
-        "endpoints (no slow embedding/vector search). Supports multiple modes:\n"
-        "- search: full-text search (FTS) — the default for most queries. Fast keyword matching. "
-        "Returns nodes, edges, and provenance chunks. Supports node_type filter.\n"
-        "- goals: retrieve active goals and milestones sorted by salience\n"
-        "- questions: open questions, hypotheses, and anomalies\n"
-        "- decisions: open decisions needing resolution\n"
-        "- neighborhood: get nodes connected to a specific node by UID\n"
-        "- weak_claims: claims with low confidence\n"
-        "- contradictions: contradictory claims in the graph"
+        "Search the semantic graph memory. Uses keyword-based full-text search (FTS), "
+        "not semantic search — use names and key terms as queries, not natural-language "
+        "questions. Basic context is auto-injected each turn; use this for deeper queries.\n"
+        "Modes: search (FTS, default), goals, questions, decisions, neighborhood (by UID), "
+        "weak_claims, contradictions."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Search query or node UID (for neighborhood mode).",
+                "description": "Keywords to search for (e.g. 'Alice Smith AI'), or node UID for neighborhood mode. Use key terms, not questions.",
             },
             "mode": {
                 "type": "string",
@@ -1917,10 +1982,10 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
 MINDGRAPH_INGEST_SCHEMA = {
     "name": "mindgraph_ingest",
     "description": (
-        "Ingest long-form content into semantic memory. Automatically handles embedding, "
-        "entity extraction, and graph linking. Short content (<500 chars) is processed "
-        "synchronously; longer content is queued for async processing. Use for: articles, "
-        "documentation, conversation transcripts, code, research papers."
+        "Ingest long-form content into semantic memory. Server-side processing extracts "
+        "entities, chunks text, and links to the graph. Short content (<500 chars) is "
+        "processed synchronously; longer content is queued for async processing. Use for: "
+        "articles, documentation, conversation transcripts, code, research papers."
     ),
     "parameters": {
         "type": "object",
