@@ -23,7 +23,7 @@ What you get:
     management, context injection, and transcript ingestion.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 import json
 import logging
@@ -189,12 +189,20 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
         Called before each LLM API call with the user's message.
         Returns topic-relevant knowledge from the semantic graph,
         or empty string if nothing relevant found.
+
+        Disable via MINDGRAPH_PROACTIVE_RETRIEVAL=false environment variable.
         """
         if not self.is_available():
             return ""
 
         try:
-            from hermes_mindgraph_plugin.tools import proactive_graph_retrieve
+            from hermes_mindgraph_plugin.tools import (
+                PROACTIVE_RETRIEVAL_ENABLED,
+                proactive_graph_retrieve,
+            )
+
+            if not PROACTIVE_RETRIEVAL_ENABLED:
+                return ""
 
             result = proactive_graph_retrieve(query)
             return result or ""
@@ -253,6 +261,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
 
         try:
             from hermes_mindgraph_plugin.tools import (
+                PRE_COMPRESS_LIMIT,
                 _filter_transcript_for_ingestion,
                 _get_client,
             )
@@ -261,12 +270,13 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
             if filtered and len(filtered) > 50:
                 client = _get_client()
                 if client:
+                    limit = PRE_COMPRESS_LIMIT
                     client.ingest_chunk(
-                        content=f"[pre-compression snapshot]\n{filtered[:2000]}"
+                        content=f"[pre-compression snapshot]\n{filtered[:limit]}"
                     )
                     logger.info(
-                        "MindGraph pre-compress snapshot ingested (%d chars)",
-                        min(len(filtered), 2000),
+                        "MindGraph pre-compress snapshot ingested (%d chars, limit=%d)",
+                        min(len(filtered), limit), limit,
                     )
         except Exception as exc:
             logger.debug("MindGraph pre-compress ingest failed (non-fatal): %s", exc)

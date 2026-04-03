@@ -5,7 +5,7 @@
 # (auto-discovered via entry points, no manual copy needed)
 
 name: mindgraph
-version: 0.4.0
+version: 0.5.0
 description: >
   Semantic graph memory provider — injects session context (goals, decisions,
   policies) and per-turn topic-relevant knowledge from MindGraph into the

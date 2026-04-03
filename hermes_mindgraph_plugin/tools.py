@@ -43,6 +43,39 @@ _active_session_uid: Optional[str] = None  # Track open MindGraph session
 _session_lock = threading.Lock()  # Protect _active_session_uid in multi-user gateway
 
 # ---------------------------------------------------------------------------
+# Configurable settings (override via environment variables)
+# ---------------------------------------------------------------------------
+
+def _env_float(key: str, default: float) -> float:
+    val = os.getenv(key, "")
+    try:
+        return float(val) if val else default
+    except ValueError:
+        return default
+
+def _env_int(key: str, default: int) -> int:
+    val = os.getenv(key, "")
+    try:
+        return int(val) if val else default
+    except ValueError:
+        return default
+
+def _env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key, "")
+    if not val:
+        return default
+    return val.lower() in ("true", "1", "yes")
+
+# Proactive retrieval settings
+SCORE_THRESHOLD = _env_float("MINDGRAPH_SCORE_THRESHOLD", 0.55)
+MIN_CHUNK_SCORE = _env_float("MINDGRAPH_MIN_CHUNK_SCORE", 0.5)
+PROACTIVE_RETRIEVAL_ENABLED = _env_bool("MINDGRAPH_PROACTIVE_RETRIEVAL", True)
+PROACTIVE_K = _env_int("MINDGRAPH_PROACTIVE_K", 5)
+
+# Pre-compression settings
+PRE_COMPRESS_LIMIT = _env_int("MINDGRAPH_PRE_COMPRESS_LIMIT", 4000)
+
+# ---------------------------------------------------------------------------
 # Proactive injection metrics (lightweight, in-memory)
 # ---------------------------------------------------------------------------
 
@@ -188,6 +221,30 @@ def check_requirements() -> bool:
     return bool(os.getenv("MINDGRAPH_API_KEY"))
 
 
+def _fts_search(client, query, limit=None, node_type=None,
+                include_edges=False, include_chunks=False):
+    """FTS search via POST /search with optional edges and chunks.
+
+    The SDK's search() has a fixed signature that doesn't expose
+    include_edges / include_chunks (added in server v0.5+).
+    This wrapper calls _request directly to pass those params.
+
+    Response shape:
+      - Old server / no flags: flat list of node dicts
+      - New server + flags:    {"results": [...], "edges": [...], "chunks": [...]}
+    """
+    params = {"query": query}
+    if limit is not None:
+        params["limit"] = limit
+    if node_type:
+        params["node_type"] = node_type
+    if include_edges:
+        params["include_edges"] = True
+    if include_chunks:
+        params["include_chunks"] = True
+    return client._request("POST", "/search", params)
+
+
 def _safe_call(fn, *args, **kwargs):
     """Call a MindGraph SDK method with error handling.
 
@@ -309,9 +366,9 @@ def retrieve_session_context() -> Optional[str]:
         except Exception as e:
             logger.debug("MindGraph goals retrieval failed: %s", e)
 
-        # ── Projects (search-based — no dedicated endpoint) ──
+        # ── Projects (structured query by node type) ──
         try:
-            results = client.search("active projects", limit=_SESSION_CONTEXT_CAPS["projects"])
+            results = client.get_nodes(node_type="Project", limit=_SESSION_CONTEXT_CAPS["projects"])
             if isinstance(results, list) and results:
                 lines = []
                 for p in results[:_SESSION_CONTEXT_CAPS["projects"]]:
@@ -328,9 +385,9 @@ def retrieve_session_context() -> Optional[str]:
         except Exception as e:
             logger.debug("MindGraph projects retrieval failed: %s", e)
 
-        # ── Tasks (search-based) ──
+        # ── Tasks (structured query by node type) ──
         try:
-            results = client.search("pending tasks", limit=_SESSION_CONTEXT_CAPS["tasks"])
+            results = client.get_nodes(node_type="Task", limit=_SESSION_CONTEXT_CAPS["tasks"])
             if isinstance(results, list) and results:
                 lines = []
                 for t in results[:_SESSION_CONTEXT_CAPS["tasks"]]:
@@ -486,8 +543,10 @@ def retrieve_session_context() -> Optional[str]:
         "0.5-0.6 uncertain; 0.3-0.4 speculative; 0.1-0.2 intuition.\n"
         "Anti-pattern: Don't argue bare observations or preferences. Claims should be falsifiable.\n\n"
         #
-        "**commit** — goals, projects, milestones\n"
+        "**commit** — goals, projects, milestones (with dedup + update)\n"
         "Status: active → completed/paused/abandoned. Don't auto-complete — let user confirm.\n"
+        "Dedup: automatically finds existing commitments with the same label — safe to call repeatedly.\n"
+        "Update: pass uid to update an existing commitment's status (e.g., mark a goal completed).\n"
         "Anti-pattern: Commits represent user intent and agency. Never commit content-derived goals.\n\n"
         #
         "**decide** — decisions with deliberation\n"
@@ -500,7 +559,8 @@ def retrieve_session_context() -> Optional[str]:
         "  nation, place, event: description\n"
         "  concept: domain, description\n"
         "  work, other: generic fallback\n"
-        "Also: capture_type='observation' for factual observations.\n"
+        "Also: capture_type='observation' for factual observations — pass entity_uid to link "
+        "the observation to a specific entity (creates HAS_OBSERVATION edge).\n"
         "KEY PRINCIPLE: Entity nodes are for stable identity. Observations are for everything you learn "
         "ABOUT them. This separation enables relevance-based retrieval — different observations surface "
         "in different contexts. Don't cram findings into entity properties.\n\n"
@@ -522,8 +582,8 @@ def retrieve_session_context() -> Optional[str]:
         "Anti-pattern: Don't ingest trivial content or duplicates.\n\n"
         #
         "**retrieve** — querying the graph\n"
-        "Modes: search (hybrid BM25+vector, default), goals, questions, decisions, "
-        "context (deep connected), neighborhood (from a node), weak_claims, contradictions.\n"
+        "Modes: search (FTS, default — supports node_type filter, returns nodes + edges + chunks), "
+        "goals, questions, decisions, neighborhood (from a node UID), weak_claims, contradictions.\n"
         "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n\n"
         #
         # ── Social graph ──
@@ -532,9 +592,9 @@ def retrieve_session_context() -> Optional[str]:
         "Every conversation should contribute to a living social graph. This is not optional "
         "and not limited to specific workflows — it's how the graph becomes genuinely useful.\n\n"
         "Pattern:\n"
-        "1. capture(entity_type='person', props={occupation, nationality}) — typed Person node\n"
+        "1. capture(entity_type='person', props={occupation, nationality}) — typed Person node (returns uid)\n"
         "2. capture(entity_type='organization') — their company/institution\n"
-        "3. capture(observation) per distinct insight — one observation per fact, not a dump:\n"
+        "3. capture(observation, entity_uid=person_uid) per distinct insight — one observation per fact, linked to entity:\n"
         "   - Intellectual profile: what they think about, their core frames\n"
         "   - Communication style: formal/informal, academic/practitioner, contrarian/consensus\n"
         "   - Technical positions: specific claims they've taken\n"
@@ -549,7 +609,7 @@ def retrieve_session_context() -> Optional[str]:
         "## Compound Patterns\n"
         "- **Learning:** ingest → argue key conclusions → journal insights → commit goals\n"
         "- **Deciding:** retrieve context → argue reasoning → decide → journal what was rejected\n"
-        "- **Completing a goal:** retrieve goals → commit status=completed → journal lessons\n"
+        "- **Completing a goal:** retrieve goals → commit(uid=goal_uid, status='completed') → journal lessons\n"
         "- **Researching a person:** capture(person) → capture(org) → multiple observations → "
         "argue(relevance) → plan(follow-up)\n"
         "- **New session:** session-start context is auto-injected. "
@@ -875,20 +935,87 @@ def mindgraph_argue(
 # ---------------------------------------------------------------------------
 
 def mindgraph_commit(
-    label: str,
+    label: str = "",
     commit_type: str = "goal",
     status: str = "active",
     description: str = "",
+    uid: str = "",
 ) -> str:
-    """Record goals, projects, and milestones.
+    """Record or update goals, projects, and milestones.
 
-    commit_type: goal, project, milestone (NOT decision — use mindgraph_argue for decisions)
+    commit_type: goal, project, milestone (NOT decision — use mindgraph_decide)
     status: active, completed, paused, abandoned
+    uid: (optional) UID of existing commitment to update
+
+    Deduplication: before creating, searches for an existing node with the same
+    label and type. If found, returns the existing node (updating status if changed).
+    Pass uid explicitly to update a known commitment.
     """
-    if not label or not label.strip():
-        return _json_response(False, error="Label is required")
-    # SDK commit() takes **kwargs -> POST /intent/commitment
-    # action field = the commit_type (goal, project, milestone)
+    if not label and not uid:
+        return _json_response(False, error="Label or uid is required")
+
+    # ── Explicit update by UID ──
+    if uid:
+        update_kwargs = {}
+        if status:
+            update_kwargs["status"] = status
+        if description:
+            update_kwargs["description"] = description
+        if label:
+            update_kwargs["label"] = label
+        result, err = _safe_call(
+            lambda c: c.update_node(uid, **update_kwargs),
+        )
+        if err:
+            return _json_response(False, error=f"Update failed: {err}")
+        return _json_response(True, data={
+            "result": result,
+            "uid": uid,
+            "message": f"Updated {commit_type}: {label or uid}",
+        })
+
+    # ── Client-side dedup: search for existing commitment with same label ──
+    _node_type_map = {"goal": "Goal", "project": "Project", "milestone": "Milestone"}
+    node_type = _node_type_map.get(commit_type)
+
+    if node_type and label:
+        try:
+            client = _get_client()
+            if client:
+                existing = client.search(label, node_type=node_type, limit=5)
+                if isinstance(existing, list):
+                    label_lower = label.strip().lower()
+                    for node in existing:
+                        existing_label = (node.get("label") or "").strip().lower()
+                        if existing_label == label_lower:
+                            # Exact match — update status/description if changed
+                            node_uid = node.get("uid", "")
+                            existing_status = _get_prop(node, "status", "")
+                            needs_update = (
+                                (status and existing_status != status)
+                                or description
+                            )
+                            if needs_update and node_uid:
+                                update_kw = {}
+                                if status and existing_status != status:
+                                    update_kw["status"] = status
+                                if description:
+                                    update_kw["description"] = description
+                                try:
+                                    client.update_node(node_uid, **update_kw)
+                                    node.update(update_kw)
+                                except Exception as ue:
+                                    logger.debug("Dedup update failed (non-fatal): %s", ue)
+                            return _json_response(True, data={
+                                "result": node,
+                                "uid": node_uid,
+                                "message": f"Found existing {commit_type}: {label} (dedup)",
+                                "deduplicated": True,
+                            })
+        except Exception:
+            pass  # Fall through to create
+
+    # ── Create new commitment ──
     kwargs = {"action": commit_type, "label": label, "status": status}
     if description:
         kwargs["description"] = description
@@ -911,40 +1038,42 @@ def mindgraph_retrieve(
     limit: int = 10,
     include_chunks: bool = True,
     include_graph: bool = True,
+    node_type: str = "",
 ) -> str:
     """Search and query the semantic graph.
 
+    All retrieval uses FTS or structured endpoints (no embedding/vector search).
+
     Modes:
-      - search: hybrid semantic search (default)
+      - search: full-text search (FTS) via POST /search — the default for most queries.
+        Returns nodes, edges, and provenance chunks. Supports node_type filter.
       - goals: active goals sorted by salience
       - questions: open questions and hypotheses
       - decisions: open decisions needing resolution
-      - context: retrieve connected graph context for a query (chunks + linked epistemic nodes)
       - neighborhood: get nodes connected to a specific node (query=node_uid)
+      - weak_claims: claims with low confidence
+      - contradictions: contradictory claims in the graph
     """
     # Validate query for modes that need it
-    if mode in ("search", "context") and not query:
-        return _json_response(False, error=f"Query required for {mode} mode")
+    if mode == "search" and not query:
+        return _json_response(False, error="Query required for search mode")
     if mode == "neighborhood" and not query:
         return _json_response(False, error="Node UID required for neighborhood mode")
-    if mode not in ("search", "goals", "questions", "decisions", "context", "neighborhood", "weak_claims", "contradictions"):
-        return _json_response(False, error=f"Unknown mode: {mode}. Use: search, goals, questions, decisions, context, neighborhood, weak_claims, contradictions")
+    if mode not in ("search", "goals", "questions", "decisions", "neighborhood", "weak_claims", "contradictions"):
+        return _json_response(False, error=f"Unknown mode: {mode}. Use: search, goals, questions, decisions, neighborhood, weak_claims, contradictions")
 
     def _do_retrieve(client):
         if mode == "search":
-            return client.hybrid_search(query, k=limit)
+            return _fts_search(
+                client, query, limit=limit, node_type=node_type or None,
+                include_edges=include_graph, include_chunks=include_chunks,
+            )
         elif mode == "goals":
             return client.get_goals()
         elif mode == "questions":
             return client.get_open_questions()
         elif mode == "decisions":
             return client.get_open_decisions()
-        elif mode == "context":
-            return client.retrieve_context(
-                query, k=limit,
-                include_chunks=include_chunks,
-                include_graph=include_graph,
-            )
         elif mode == "neighborhood":
             return client.neighborhood(query, max_depth=1)
         elif mode == "weak_claims":
@@ -952,100 +1081,127 @@ def mindgraph_retrieve(
         elif mode == "contradictions":
             return client.get_contradictions()
 
+    # Hard caps for structured modes (these endpoints return everything)
+    _STRUCTURED_CAPS = {
+        "goals": 10,
+        "questions": 10,
+        "decisions": 10,
+        "weak_claims": 10,
+        "contradictions": 10,
+        "neighborhood": 20,
+    }
+    effective_limit = min(limit, _STRUCTURED_CAPS.get(mode, limit))
+
     result, err = _safe_call(_do_retrieve)
     if err:
         return _json_response(False, error=f"Retrieve failed: {err}")
 
-    # Context mode returns {chunks: [...], graph: {nodes: [...], edges: [...]}}
-    # Handle this richer structure separately.
-    if mode == "context" and isinstance(result, dict) and ("chunks" in result or "graph" in result):
-        return _json_response(True, data=_format_context_result(result, query, limit))
-
-    # Normalize results — handle various response shapes:
-    # - list of {node: {...}, score: N} (hybrid_search)
-    # - list of node dicts (get_goals, search, etc.)
-    # - dict with nested lists
+    # Normalize results — handle both enriched dict and flat list responses:
+    # - Enriched (search with include_*): {"results": [...], "edges": [...], "chunks": [...]}
+    # - Flat list: [{node}, ...] or [{node: {...}, score: N}, ...]
+    edges = []
+    chunks = []
     if isinstance(result, dict):
-        nodes = result.get("nodes", result.get("results", []))
+        nodes = result.get("results", result.get("nodes", []))
+        edges = result.get("edges", [])
+        chunks = result.get("chunks", [])
     elif isinstance(result, list):
         nodes = result
     else:
         nodes = [result] if result else []
 
-    # Format nodes for readability
+    # Format nodes — lean output for structured modes, full for search
     formatted = []
-    for item in nodes[:limit]:
-        if isinstance(item, dict):
-            # Unwrap {node: {...}, score: N} envelope
-            n = item.get("node", item) if "node" in item else item
+    for item in nodes[:effective_limit]:
+        if not isinstance(item, dict):
+            formatted.append(str(item))
+            continue
+
+        # Unwrap {node: {...}, score: N} envelope
+        n = item.get("node", item) if "node" in item else item
+
+        if mode in ("goals", "questions", "decisions"):
+            # Lean: only uid, label, status
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+            }
+            status = _get_prop(n, "status", "")
+            if status:
+                entry["status"] = status
+            formatted.append(entry)
+
+        elif mode == "weak_claims":
+            # Lean: uid, label, confidence
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+            }
+            conf = n.get("confidence", _get_prop(n, "confidence", ""))
+            if conf:
+                entry["confidence"] = conf
+            formatted.append(entry)
+
+        elif mode == "contradictions":
+            # Lean: uid, label, confidence
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+            }
+            conf = n.get("confidence", _get_prop(n, "confidence", ""))
+            if conf:
+                entry["confidence"] = conf
+            formatted.append(entry)
+
+        else:
+            # Full format for search / neighborhood
             score = item.get("score", "")
             entry = {
                 "uid": n.get("uid", ""),
                 "label": n.get("label", ""),
                 "type": n.get("node_type", n.get("type", "")),
-                "salience": n.get("salience", ""),
-                "status": _get_prop(n, "status", ""),
-                "created": n.get("created_at", ""),
             }
+            status = _get_prop(n, "status", "")
+            if status:
+                entry["status"] = status
             if score:
                 entry["score"] = score
-            # Include summary if available and label is short/generic
+            # Include summary only if label is short/generic
             summary = n.get("summary", "")
             if summary and (not entry["label"] or entry["label"].startswith("chunk-")):
                 entry["summary"] = summary[:200]
             formatted.append(entry)
-        else:
-            formatted.append(str(item))
 
-    return _json_response(True, data={
+    data = {
         "results": formatted,
         "count": len(formatted),
         "mode": mode,
-        "query": query,
-    })
+    }
+    if query:
+        data["query"] = query
 
+    # Include edges and chunks when present (FTS enriched response)
+    if edges:
+        data["edges"] = [
+            {
+                "type": e.get("edge_type", e.get("type", "")),
+                "source": e.get("source_label", e.get("from_label", e.get("source_uid", ""))),
+                "target": e.get("target_label", e.get("to_label", e.get("target_uid", ""))),
+            }
+            for e in edges[:effective_limit]
+        ]
+        data["edge_count"] = len(edges)
+    if chunks:
+        data["chunks"] = [
+            {
+                "content": c.get("content", c.get("text", ""))[:500],
+                "document_title": c.get("document_title", c.get("source", "")),
+            }
+            for c in chunks[:effective_limit]
+        ]
+        data["chunk_count"] = len(chunks)
 
-def _format_context_result(result: dict, query: str, limit: int) -> dict:
-    """Format retrieve_context response with chunks and graph nodes."""
-    data = {"mode": "context", "query": query}
-
-    # Format chunks (raw source text with relevance scores)
-    chunks = result.get("chunks", [])
-    formatted_chunks = []
-    for c in chunks[:limit]:
-        entry = {
-            "content": c.get("content", "")[:500],  # Cap chunk text
-            "score": c.get("score", ""),
-            "document_title": c.get("document_title", ""),
-        }
-        formatted_chunks.append(entry)
-    data["chunks"] = formatted_chunks
-    data["chunk_count"] = len(formatted_chunks)
-
-    # Format graph nodes (epistemic layer — claims, questions, etc.)
-    graph = result.get("graph", {})
-    graph_nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
-    formatted_nodes = []
-    for n in graph_nodes[:limit]:
-        entry = {
-            "uid": n.get("uid", ""),
-            "label": n.get("label", ""),
-            "type": n.get("node_type", n.get("type", "")),
-            "salience": n.get("salience", ""),
-        }
-        # Include confidence for epistemic nodes
-        conf = n.get("confidence", _get_prop(n, "confidence", ""))
-        if conf:
-            entry["confidence"] = conf
-        formatted_nodes.append(entry)
-    data["graph_nodes"] = formatted_nodes
-    data["graph_node_count"] = len(formatted_nodes)
-
-    # Include edge count for awareness
-    edges = graph.get("edges", []) if isinstance(graph, dict) else []
-    data["graph_edge_count"] = len(edges)
-
-    return data
+    return _json_response(True, data=data)
 
 
 # ---------------------------------------------------------------------------
@@ -1057,6 +1213,7 @@ def mindgraph_capture(
     capture_type: str = "entity",
     entity_type: str = "concept",
     properties: dict = None,
+    entity_uid: str = "",
 ) -> str:
     """Capture facts in the Reality layer — entities, observations, and concepts.
 
@@ -1064,10 +1221,12 @@ def mindgraph_capture(
       - entity: A concrete thing — each entity_type creates a distinct node type with its
         own properties and edge types in the graph. Uses deduplication — safe to call repeatedly.
       - observation: A factual observation about the world — something noticed or reported.
+        Pass entity_uid to explicitly link the observation to an entity.
       - concept: An abstract concept in the Epistemic layer (via structure endpoint).
 
     entity_type (entity only): concept, person, organization, nation, place, event, work, other
     properties: additional properties dict (type-specific props passed to the server)
+    entity_uid: (observation only) UID of an entity to link this observation to via HAS_OBSERVATION edge
     """
     if not label or not label.strip():
         return _json_response(False, error="Label is required")
@@ -1110,7 +1269,28 @@ def mindgraph_capture(
         )
         if err:
             return _json_response(False, error=f"Observation capture failed: {err}")
-        return _json_response(True, data={"result": result, "message": f"Observation: {label}"})
+
+        # Link observation to entity if entity_uid provided
+        linked = False
+        if entity_uid and result and isinstance(result, dict):
+            obs_uid = result.get("uid", "")
+            if obs_uid:
+                _, link_err = _safe_call(
+                    lambda c: c.add_edge(
+                        source_uid=entity_uid,
+                        target_uid=obs_uid,
+                        edge_type="HAS_OBSERVATION",
+                    ),
+                )
+                if link_err:
+                    logger.debug("Observation-entity link failed (non-fatal): %s", link_err)
+                else:
+                    linked = True
+
+        msg = f"Observation: {label}"
+        if linked:
+            msg += f" (linked to {entity_uid[:8]})"
+        return _json_response(True, data={"result": result, "message": msg})
 
     elif capture_type == "concept":
         result, err = _safe_call(
@@ -1333,22 +1513,34 @@ def mindgraph_plan(
 # Proactive graph retrieval (called from run_agent.py per-turn)
 # ---------------------------------------------------------------------------
 
-def proactive_graph_retrieve(user_message: str, k: int = 5) -> Optional[str]:
+def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
     """Retrieve relevant graph context for the current user message.
 
-    Called at the start of each turn (like Honcho prefetch) to give the agent
-    topic-relevant knowledge from the semantic graph without requiring an
-    explicit tool call.
+    Called at the start of each turn to give the agent topic-relevant knowledge
+    from the semantic graph without requiring an explicit tool call.
 
-    Returns a formatted string for injection into the user message at API-call
-    time, or None if nothing relevant is found or MindGraph is unavailable.
+    Uses FTS (full-text search via POST /search) with include_edges=true and
+    include_chunks=true for low-latency per-turn retrieval that returns graph
+    nodes, their connecting edges, and provenance chunks in a single round-trip.
 
-    Uses retrieve_context with both chunks and graph nodes for maximum context.
-    Only returns results above a minimum relevance threshold to avoid noise.
+    Response shape (server v0.5+):
+        {"results": [nodes...], "edges": [edges...], "chunks": [chunks...]}
+
+    Falls back gracefully to flat node list on older servers.
 
     Metrics are tracked in `proactive_metrics` (call .snapshot() for a summary).
+
+    Configurable via environment variables:
+        MINDGRAPH_PROACTIVE_RETRIEVAL: "true"/"false" to enable/disable (default: true)
+        MINDGRAPH_PROACTIVE_K: max results per retrieval (default: 5)
     """
     import time as _time
+
+    if not PROACTIVE_RETRIEVAL_ENABLED:
+        return None
+
+    if k <= 0:
+        k = PROACTIVE_K
 
     if not check_requirements():
         return None
@@ -1365,11 +1557,9 @@ def proactive_graph_retrieve(user_message: str, k: int = 5) -> Optional[str]:
 
     t0 = _time.monotonic()
     try:
-        result = client.retrieve_context(
-            stripped[:500],  # Cap query length
-            k=k,
-            include_chunks=True,
-            include_graph=True,
+        raw = _fts_search(
+            client, stripped[:500], limit=k,
+            include_edges=True, include_chunks=True,
         )
     except Exception as e:
         latency_ms = (_time.monotonic() - t0) * 1000
@@ -1379,57 +1569,54 @@ def proactive_graph_retrieve(user_message: str, k: int = 5) -> Optional[str]:
 
     latency_ms = (_time.monotonic() - t0) * 1000
 
-    if not result or not isinstance(result, dict):
+    # Normalize response — handle both enriched dict and flat list (old server)
+    if isinstance(raw, dict):
+        nodes = raw.get("results", [])
+        edges = raw.get("edges", [])
+        chunks = raw.get("chunks", [])
+    elif isinstance(raw, list):
+        nodes = raw
+        edges = []
+        chunks = []
+    else:
+        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
+        return None
+
+    if not nodes and not chunks:
         proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
         return None
 
     sections = []
 
-    # Format relevant chunks (source text)
-    chunks = result.get("chunks", [])
-    # Gate on top chunk score — if even the best match isn't strongly relevant,
-    # the topic isn't in the graph and we skip the entire injection.
-    top_score = max((c.get("score") or 0) for c in chunks) if chunks else 0
-    if top_score < 0.55:
-        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=top_score, skip_reason="threshold")
-        logger.debug("MindGraph proactive: below threshold (top_score=%.3f, %.0fms)", top_score, latency_ms)
-        return None
-    MIN_CHUNK_SCORE = 0.5  # Only include chunks with solid relevance
-    relevant_chunks = [c for c in chunks if (c.get("score") or 0) >= MIN_CHUNK_SCORE]
-    if relevant_chunks:
+    # ── Format chunks (provenance source text) ──
+    if chunks:
         chunk_lines = []
-        for c in relevant_chunks[:3]:  # Max 3 chunks to keep it concise
-            title = c.get("document_title", "")
-            content = c.get("content", "")[:300]
-            score = c.get("score", "")
+        for c in chunks[:3]:
+            content = c.get("content", c.get("text", ""))[:300]
+            title = c.get("document_title", c.get("source", ""))
+            if not content:
+                continue
             header = f"[{title}]" if title else "[chunk]"
-            if score:
-                header += f" (relevance: {score:.2f})"
             chunk_lines.append(f"{header}\n{content}")
-        sections.append("Source Knowledge:\n" + "\n---\n".join(chunk_lines))
+        if chunk_lines:
+            sections.append("Source Knowledge:\n" + "\n---\n".join(chunk_lines))
 
-    # Format graph nodes — separate by type for behavioral framing
-    graph = result.get("graph", {})
-    graph_nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
-
-    # Categorize nodes by their behavioral implications
+    # ── Format graph nodes — categorize by behavioral implications ──
     knowledge_lines = []
     question_lines = []
     caution_lines = []
     decision_lines = []
 
-    for n in graph_nodes[:12]:
+    for n in nodes[:k]:
         label = n.get("label", "")
         ntype = n.get("node_type", n.get("type", ""))
-        conf = n.get("confidence", "")
-        sal = n.get("salience", "")
+        conf = n.get("confidence", _get_prop(n, "confidence", ""))
         if not label:
             continue
 
         line = f"  - [{ntype}] {label}"
         if conf:
             line += f" (confidence: {conf})"
-            # Flag weak claims as caution items
             try:
                 if float(conf) < 0.5:
                     caution_lines.append(f"  - [{conf}] {label}")
@@ -1462,13 +1649,25 @@ def proactive_graph_retrieve(user_message: str, k: int = 5) -> Optional[str]:
             + "\n".join(decision_lines[:3])
         )
 
+    # ── Format edges (relationships between nodes) ──
+    if edges:
+        edge_lines = []
+        for e in edges[:5]:
+            etype = e.get("edge_type", e.get("type", ""))
+            src = e.get("source_label", e.get("from_label", ""))
+            tgt = e.get("target_label", e.get("to_label", ""))
+            if src and tgt and etype:
+                edge_lines.append(f"  - {src} —[{etype}]→ {tgt}")
+        if edge_lines:
+            sections.append("Relationships:\n" + "\n".join(edge_lines))
+
     if not sections:
-        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=top_score)
+        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
         return None
 
-    proactive_metrics.record(hit=True, latency_ms=latency_ms, top_score=top_score)
-    logger.info("MindGraph proactive: HIT (top_score=%.3f, %.0fms, %d chunks, %d nodes)",
-                top_score, latency_ms, len(relevant_chunks), len(graph_nodes))
+    proactive_metrics.record(hit=True, latency_ms=latency_ms, top_score=0)
+    logger.info("MindGraph proactive: HIT (%.0fms, %d nodes, %d edges, %d chunks)",
+                latency_ms, len(nodes), len(edges), len(chunks))
 
     return (
         "# MindGraph Context (Topic-Relevant)\n\n"
@@ -1625,10 +1824,13 @@ MINDGRAPH_ARGUE_SCHEMA = {
 MINDGRAPH_COMMIT_SCHEMA = {
     "name": "mindgraph_commit",
     "description": (
-        "Record goals, decisions, projects, and milestones. Use for things that "
-        "represent intent and commitment — what the user wants to achieve, decisions "
-        "made, projects being tracked. These are retrieved at session start to provide "
-        "continuity across conversations."
+        "Record or update goals, projects, and milestones. Use for things that "
+        "represent intent and commitment — what the user wants to achieve, "
+        "projects being tracked. These are retrieved at session start to provide "
+        "continuity across conversations.\n\n"
+        "Deduplication: automatically finds existing commitments with the same label "
+        "instead of creating duplicates. Pass uid to update a specific commitment "
+        "(e.g., change status from active to completed)."
     ),
     "parameters": {
         "type": "object",
@@ -1651,8 +1853,12 @@ MINDGRAPH_COMMIT_SCHEMA = {
                 "type": "string",
                 "description": "Detailed description or context.",
             },
+            "uid": {
+                "type": "string",
+                "description": "UID of existing commitment to update (e.g., change status). Retrieve UIDs via mindgraph_retrieve(mode='goals').",
+            },
         },
-        "required": ["label"],
+        "required": [],
     },
 }
 
@@ -1662,13 +1868,16 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
         "Targeted search of the semantic graph memory. Basic context is automatically "
         "injected each turn — use this tool when you need deeper, more specific, or "
         "follow-up retrieval (e.g., a refined query, exploring a specific topic, or "
-        "checking structured nodes like goals/decisions). Supports multiple modes:\n"
-        "- search: hybrid semantic search (BM25 + vector) — the default for most queries\n"
+        "checking structured nodes like goals/decisions). All modes use FTS or structured "
+        "endpoints (no slow embedding/vector search). Supports multiple modes:\n"
+        "- search: full-text search (FTS) — the default for most queries. Fast keyword matching. "
+        "Returns nodes, edges, and provenance chunks. Supports node_type filter.\n"
         "- goals: retrieve active goals and milestones sorted by salience\n"
         "- questions: open questions, hypotheses, and anomalies\n"
         "- decisions: open decisions needing resolution\n"
-        "- context: retrieve connected graph context around a query (chunks + linked nodes)\n"
-        "- neighborhood: get nodes connected to a specific node by UID"
+        "- neighborhood: get nodes connected to a specific node by UID\n"
+        "- weak_claims: claims with low confidence\n"
+        "- contradictions: contradictory claims in the graph"
     ),
     "parameters": {
         "type": "object",
@@ -1679,8 +1888,8 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["search", "goals", "questions", "decisions", "context", "neighborhood", "weak_claims", "contradictions"],
-                "description": "Retrieval mode. Default: search.",
+                "enum": ["search", "goals", "questions", "decisions", "neighborhood", "weak_claims", "contradictions"],
+                "description": "Retrieval mode. Default: search (FTS).",
             },
             "limit": {
                 "type": "integer",
@@ -1688,13 +1897,17 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
                 "minimum": 1,
                 "maximum": 50,
             },
+            "node_type": {
+                "type": "string",
+                "description": "(search mode only) Filter results by node type (e.g. 'Person', 'Goal', 'Project', 'Task', 'Claim').",
+            },
             "include_chunks": {
                 "type": "boolean",
-                "description": "(Context mode only) Include raw source text chunks. Default: true.",
+                "description": "(search mode) Include provenance source text chunks. Default: true.",
             },
             "include_graph": {
                 "type": "boolean",
-                "description": "(Context mode only) Include linked epistemic graph nodes. Default: true.",
+                "description": "(search mode) Include connecting edges between result nodes. Default: true.",
             },
         },
         "required": [],
@@ -1736,7 +1949,8 @@ MINDGRAPH_CAPTURE_SCHEMA = {
         "Capture facts into the knowledge graph.\n"
         "- entity: Concrete things (people, orgs, concepts, places, events, works) in the Reality layer. "
         "Uses deduplication — safe to call repeatedly for the same entity.\n"
-        "- observation: Factual observations about the world in the Reality layer.\n"
+        "- observation: Factual observations about the world in the Reality layer. "
+        "Pass entity_uid to link the observation to an entity (recommended).\n"
         "- concept: Abstract concepts in the Epistemic layer (theories, frameworks, patterns)."
     ),
     "parameters": {
@@ -1759,6 +1973,10 @@ MINDGRAPH_CAPTURE_SCHEMA = {
             "properties": {
                 "type": "object",
                 "description": "Additional properties (e.g. domain, author, description).",
+            },
+            "entity_uid": {
+                "type": "string",
+                "description": "(observation only) UID of entity to link this observation to. Creates a HAS_OBSERVATION edge. Get entity UIDs from prior capture() or retrieve() calls.",
             },
         },
         "required": ["label"],
@@ -1961,6 +2179,7 @@ TOOLS = [
             commit_type=args.get("commit_type", "goal"),
             status=args.get("status", "active"),
             description=args.get("description", ""),
+            uid=args.get("uid", ""),
         ),
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
@@ -1976,6 +2195,7 @@ TOOLS = [
             limit=args.get("limit", 10),
             include_chunks=args.get("include_chunks", True),
             include_graph=args.get("include_graph", True),
+            node_type=args.get("node_type", ""),
         ),
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
@@ -2003,6 +2223,7 @@ TOOLS = [
             capture_type=args.get("capture_type", "entity"),
             entity_type=args.get("entity_type", "concept"),
             properties=args.get("properties"),
+            entity_uid=args.get("entity_uid", ""),
         ),
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
