@@ -1,8 +1,8 @@
-"""MindGraph semantic graph memory plugin for Hermes Agent.
+"""MindGraph semantic graph memory provider for Hermes Agent.
 
-Bridges MindGraph (https://mindgraph.cloud) into Hermes Agent's plugin
-lifecycle hooks, giving any Hermes-powered agent persistent semantic memory
-across sessions.
+Implements the MemoryProvider interface to bridge MindGraph
+(https://mindgraph.cloud) into Hermes Agent, giving any Hermes-powered
+agent persistent semantic memory across sessions.
 
 Install:
     pip install hermes-mindgraph-plugin
@@ -12,268 +12,332 @@ Configure:
 
 The plugin is auto-discovered via the ``hermes_agent.plugins`` entry point.
 It can also be installed manually by copying this package to
-``~/.hermes/plugins/mindgraph/`` with an accompanying ``plugin.yaml``.
+``~/.hermes/plugins/memory/mindgraph/`` with an accompanying ``plugin.yaml``.
 
 What you get:
     11 MindGraph tools — session, journal, argue, commit, retrieve, ingest,
-    capture, inquire, action, decide, plan — registered into the "mindgraph"
-    toolset so the agent can read/write the semantic graph.
+    capture, inquire, action, decide, plan — registered via get_tool_schemas().
 
-    3 lifecycle hooks — on_session_start, pre_llm_call, on_session_end —
-    for automatic session management, context injection, and transcript
-    ingestion.
-
-Hooks registered:
-    on_session_start  — Opens a MindGraph session, pre-fetches context.
-    pre_llm_call      — Injects session context (goals, decisions, policies)
-                        on first turn; score-gated semantic retrieval every turn.
-    on_session_end    — Closes the MindGraph session.
+    Lifecycle hooks — initialize, system_prompt_block, prefetch, sync_turn,
+    on_session_end, on_pre_compress, shutdown — for automatic session
+    management, context injection, and transcript ingestion.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
+import json
 import logging
+import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# State — per-process, reset on session_start
+# Import MemoryProvider ABC — graceful fallback for older Hermes versions
 # ---------------------------------------------------------------------------
 
-_session_context_cache: Optional[str] = None
-_session_started: bool = False
-_accumulated_messages: list = []
-_current_session_id: Optional[str] = None
-_atexit_registered: bool = False
-_is_cron_session: bool = False  # Read-only mode: context injection, no session/ingestion
+try:
+    from agent.memory_provider import MemoryProvider as _MemoryProviderBase
+except ImportError:
+    # Hermes version doesn't have MemoryProvider yet — define a stub so the
+    # class can still be instantiated and the old register() path still works.
+    class _MemoryProviderBase:  # type: ignore[no-redef]
+        pass
 
 
-def _is_available() -> bool:
-    """Check if MindGraph is configured and ready."""
-    try:
-        from hermes_mindgraph_plugin.tools import check_requirements
-        return check_requirements()
-    except ImportError:
-        return False
+class MindGraphMemoryProvider(_MemoryProviderBase):
+    """MindGraph semantic graph memory provider.
 
-
-# ---------------------------------------------------------------------------
-# Hook callbacks
-# ---------------------------------------------------------------------------
-
-def _on_session_start(
-    *, session_id: str = "", model: str = "", platform: str = "", **kw
-):
-    """Open a MindGraph session and pre-fetch session context.
-
-    If a previous session is still open (different session_id), close it
-    first with the accumulated transcript for post-session ingestion.
+    Implements the Hermes MemoryProvider interface to provide:
+    - Session-start context injection (goals, decisions, policies, weak claims)
+    - Per-turn proactive semantic retrieval
+    - 11 cognitive tools for structured knowledge capture
+    - Post-session transcript ingestion for cross-session continuity
     """
-    global _session_context_cache, _session_started, _accumulated_messages, _current_session_id, _is_cron_session
 
-    _is_cron = platform == "cron"
-    _is_cron_session = _is_cron
+    def __init__(self):
+        self._session_id: Optional[str] = None
+        self._session_context_cache: Optional[str] = None
+        self._session_started: bool = False
+        self._is_cron_session: bool = False
+        self._hermes_home: Optional[str] = None
+        self._accumulated_messages: list = []
+        self._sync_thread: Optional[threading.Thread] = None
 
-    # Close the *previous* session if one exists with a different ID.
-    # This is the real session-close point: on_session_end fires after
-    # every run_conversation() call (every message), but on_session_start
-    # fires only when a new session begins — so we close here.
-    # (Skip for cron — cron never opens sessions.)
-    if not _is_cron and _session_started and _current_session_id and _current_session_id != session_id:
-        _close_mindgraph_session(_current_session_id)
+    # ------------------------------------------------------------------
+    # Required methods
+    # ------------------------------------------------------------------
 
-    _session_context_cache = None
-    _session_started = False
-    _accumulated_messages = []
-    _current_session_id = session_id
+    @property
+    def name(self) -> str:
+        return "mindgraph"
 
-    if not _is_available():
-        return
+    def is_available(self) -> bool:
+        """Check if MindGraph API key is configured. NO network calls."""
+        return bool(os.environ.get("MINDGRAPH_API_KEY"))
 
-    # Open session — skip for cron (no session node pollution in graph)
-    if not _is_cron:
+    def initialize(self, session_id: str, **kwargs) -> None:
+        """Called once at agent startup.
+
+        Opens a MindGraph session (unless cron mode) and pre-fetches
+        session context (goals, decisions, policies, weak claims).
+
+        kwargs includes:
+            hermes_home (str): Active HERMES_HOME path
+            platform (str): "cli", "gateway", or "cron"
+            model (str): Model identifier
+        """
+        self._hermes_home = kwargs.get("hermes_home", "")
+        platform = kwargs.get("platform", "")
+        self._is_cron_session = (platform == "cron")
+
+        # Close the *previous* session if one exists with a different ID.
+        if (
+            not self._is_cron_session
+            and self._session_started
+            and self._session_id
+            and self._session_id != session_id
+        ):
+            self._close_session()
+
+        self._session_id = session_id
+        self._session_started = False
+        self._session_context_cache = None
+        self._accumulated_messages = []
+
+        # Open MindGraph session — skip for cron (no session node pollution)
+        if not self._is_cron_session:
+            try:
+                from hermes_mindgraph_plugin.tools import auto_open_session
+
+                label = f"hermes-{session_id[:8]}" if session_id else "hermes-session"
+                sid = auto_open_session(label=label)
+                if sid:
+                    logger.info("MindGraph session opened: %s", sid)
+                    self._session_started = True
+            except Exception as exc:
+                logger.debug("MindGraph session open failed (non-fatal): %s", exc)
+        else:
+            logger.info("MindGraph cron mode: read-only (no session open)")
+
+        # Pre-fetch session context for system_prompt_block()
         try:
-            from hermes_mindgraph_plugin.tools import auto_open_session
+            from hermes_mindgraph_plugin.tools import retrieve_session_context
 
-            label = f"hermes-{session_id[:8]}" if session_id else "hermes-session"
-            sid = auto_open_session(label=label)
-            if sid:
-                logger.info("MindGraph session opened: %s", sid)
-                _session_started = True
+            self._session_context_cache = retrieve_session_context()
         except Exception as exc:
-            logger.debug("MindGraph session open failed (non-fatal): %s", exc)
-    else:
-        logger.info("MindGraph cron mode: read-only (no session open, context will be fetched)")
+            logger.debug("MindGraph session context prefetch failed: %s", exc)
 
-    # Pre-fetch session context (goals, decisions, policies, weak claims)
-    # so it's ready for the first pre_llm_call without blocking.
-    # Cron jobs GET this too — they need goals, policies, and recent
-    # activity context to make informed decisions.
-    try:
-        from hermes_mindgraph_plugin.tools import retrieve_session_context
+    def get_tool_schemas(self) -> list:
+        """Return OpenAI function-calling schemas for all 11 MindGraph tools."""
+        try:
+            from hermes_mindgraph_plugin.tools import TOOLS
+            return [t["schema"] for t in TOOLS]
+        except ImportError:
+            logger.warning("MindGraph tools module not available")
+            return []
 
-        _session_context_cache = retrieve_session_context()
-    except Exception as exc:
-        logger.debug("MindGraph session context prefetch failed: %s", exc)
+    def handle_tool_call(self, name: str, args: dict) -> str:
+        """Dispatch a tool call to the appropriate MindGraph tool handler."""
+        try:
+            from hermes_mindgraph_plugin.tools import TOOLS
+        except ImportError:
+            return json.dumps({"success": False, "error": "MindGraph tools not available"})
 
+        for t in TOOLS:
+            if t["name"] == name:
+                try:
+                    return t["handler"](args)
+                except Exception as exc:
+                    return json.dumps({"success": False, "error": str(exc)})
 
-def _pre_llm_call(
-    *,
-    session_id: str = "",
-    user_message: str = "",
-    conversation_history: list = None,
-    is_first_turn: bool = False,
-    model: str = "",
-    platform: str = "",
-    **kw,
-) -> dict | None:
-    """Return context to inject into the agent's ephemeral system prompt.
+        return json.dumps({"success": False, "error": f"Unknown tool: {name}"})
 
-    First turn: cached session context (goals, decisions, policies, weak claims).
-    Every turn:  score-gated semantic retrieval for topic relevance.
+    def get_config_schema(self) -> list:
+        """Declare configuration fields for setup wizard."""
+        return [
+            {
+                "key": "api_key",
+                "description": "MindGraph API key (get one at https://mindgraph.cloud)",
+                "secret": True,
+                "required": True,
+                "env_var": "MINDGRAPH_API_KEY",
+                "url": "https://mindgraph.cloud",
+            },
+        ]
 
-    Returns ``{"context": "..."}`` or ``None``.
-    """
-    if not _is_available():
-        return None
+    def save_config(self, values: dict, hermes_home: str) -> None:
+        """Save non-secret config. All MindGraph config is via env var (secret)."""
+        pass
 
-    # --- Accumulate messages for post-session ingestion (skip for cron) ---
-    if conversation_history and not _is_cron_session:
-        _accumulate_messages(conversation_history)
+    # ------------------------------------------------------------------
+    # Optional lifecycle hooks
+    # ------------------------------------------------------------------
 
-    parts: list[str] = []
+    def system_prompt_block(self) -> str:
+        """Return static provider info + session context for the system prompt.
 
-    # --- Session context (first turn only) ---
-    if is_first_turn and _session_context_cache:
-        parts.append(_session_context_cache)
-        # Don't clear the cache — the gateway creates a fresh AIAgent per
-        # message, so is_first_turn may be True on every gateway turn for
-        # continuing sessions.  The cache stays valid for the process
-        # lifetime and is reset on the next on_session_start.
+        Includes the behavioral contract and cached session context
+        (goals, decisions, policies, weak claims) fetched during initialize().
+        """
+        return self._session_context_cache or ""
 
-    # --- Per-turn semantic retrieval ---
-    if user_message:
+    def prefetch(self, query: str) -> str:
+        """Per-turn proactive semantic retrieval.
+
+        Called before each LLM API call with the user's message.
+        Returns topic-relevant knowledge from the semantic graph,
+        or empty string if nothing relevant found.
+        """
+        if not self.is_available():
+            return ""
+
         try:
             from hermes_mindgraph_plugin.tools import proactive_graph_retrieve
 
-            turn_ctx = proactive_graph_retrieve(user_message)
-            if turn_ctx:
-                parts.append(turn_ctx)
+            result = proactive_graph_retrieve(query)
+            return result or ""
         except Exception as exc:
-            logger.debug("MindGraph turn retrieval failed (non-fatal): %s", exc)
+            logger.debug("MindGraph prefetch failed (non-fatal): %s", exc)
+            return ""
 
-    if parts:
-        return {"context": "\n\n".join(parts)}
-    return None
+    def queue_prefetch(self, query: str) -> None:
+        """Pre-warm cache after each turn (no-op for now).
 
+        MindGraph retrieval is fast enough that prefetch() handles
+        everything synchronously. This hook is available for future
+        optimization if needed.
+        """
+        pass
 
-def _close_mindgraph_session(session_id: str):
-    """Close the MindGraph session with accumulated transcript.
+    def sync_turn(self, user_content: str, assistant_content: str) -> None:
+        """Accumulate turn messages for post-session ingestion.
 
-    Shared by on_session_start (closing previous session) and
-    on_session_end (final cleanup on process exit).
-    """
-    global _session_context_cache, _session_started, _accumulated_messages, _current_session_id
+        Non-blocking: only appends to an in-memory list.
+        The actual API call happens in on_session_end() or shutdown().
+        """
+        if self._is_cron_session:
+            return
 
-    if not _session_started:
-        return
-
-    try:
-        from hermes_mindgraph_plugin.tools import auto_close_session
-
-        summary = (
-            f"Session {session_id[:8] if session_id else 'unknown'} (completed)"
-        )
-
-        transcript = _accumulated_messages if _accumulated_messages else None
-        if transcript:
-            logger.info(
-                "MindGraph session close: passing %d messages for ingestion",
-                len(transcript),
+        if user_content:
+            self._accumulated_messages.append(
+                {"role": "user", "content": user_content}
+            )
+        if assistant_content:
+            self._accumulated_messages.append(
+                {"role": "assistant", "content": assistant_content}
             )
 
-        auto_close_session(
-            summary=summary,
-            transcript_messages=transcript,
-        )
-        logger.info("MindGraph session closed: %s", session_id[:8] if session_id else "unknown")
-    except Exception as exc:
-        logger.debug("MindGraph session close failed (non-fatal): %s", exc)
-    finally:
-        _session_started = False
-        _session_context_cache = None
-        _accumulated_messages = []
-        _current_session_id = None
+    def on_session_end(self, messages: list) -> None:
+        """Final extraction/flush on conversation end.
 
+        Closes the MindGraph session and ingests the full transcript
+        for 5-layer knowledge extraction.
+        """
+        if not self._session_started:
+            return
 
-def _accumulate_messages(conversation_history: list):
-    """Snapshot user/assistant messages from conversation_history.
+        # Prefer the messages argument; fall back to accumulated
+        transcript = messages if messages else self._accumulated_messages
+        self._close_session(transcript)
 
-    Called each turn with the full message list.  We keep only user and
-    assistant messages (by role) and deduplicate by checking whether the
-    last accumulated message matches the last message in the incoming list
-    — this avoids re-storing the entire history every turn.
-    """
-    global _accumulated_messages
+    def on_pre_compress(self, messages: list) -> None:
+        """Save insights before context window compression.
 
-    # Find new messages: conversation_history grows each turn, so we only
-    # need messages beyond what we already have.
-    start = len(_accumulated_messages)
+        Ingests a snapshot of the conversation being compressed so
+        key context is not lost when the window rolls over.
+        """
+        if not self._session_started or not self.is_available():
+            return
 
-    # Filter to user/assistant only from the full history
-    relevant = [
-        m for m in conversation_history
-        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-    ]
+        try:
+            from hermes_mindgraph_plugin.tools import (
+                _filter_transcript_for_ingestion,
+                _get_client,
+            )
 
-    if len(relevant) > start:
-        _accumulated_messages = relevant  # Replace with full filtered set
+            filtered = _filter_transcript_for_ingestion(messages)
+            if filtered and len(filtered) > 50:
+                client = _get_client()
+                if client:
+                    client.ingest_chunk(
+                        content=f"[pre-compression snapshot]\n{filtered[:2000]}"
+                    )
+                    logger.info(
+                        "MindGraph pre-compress snapshot ingested (%d chars)",
+                        min(len(filtered), 2000),
+                    )
+        except Exception as exc:
+            logger.debug("MindGraph pre-compress ingest failed (non-fatal): %s", exc)
 
+    def on_memory_write(self, action: str, target: str, content: str) -> None:
+        """Mirror built-in memory writes into MindGraph.
 
-def _on_session_end(
-    *,
-    session_id: str = "",
-    completed: bool = True,
-    interrupted: bool = False,
-    model: str = "",
-    platform: str = "",
-    **kw,
-):
-    """Close the MindGraph session with transcript ingestion.
+        Captures Hermes built-in memory writes (e.g., user preferences,
+        facts) as journal entries in MindGraph for cross-system continuity.
+        """
+        if not self.is_available() or self._is_cron_session:
+            return
 
-    In the gateway, on_session_end fires after every run_conversation()
-    call (every message), NOT just at session end.  The real close happens
-    in on_session_start when a *new* session begins.
+        try:
+            from hermes_mindgraph_plugin.tools import mindgraph_journal
 
-    We still close here for the CLI case (single run_conversation per
-    session) and for interrupted/non-completed sessions.
-    """
-    if not _session_started:
-        return
+            entry_type = "preference" if action == "preference" else "note"
+            entry = f"[{action}:{target}] {content}" if target else content
+            mindgraph_journal(entry, entry_type=entry_type)
+        except Exception as exc:
+            logger.debug("MindGraph memory write mirror failed (non-fatal): %s", exc)
 
-    # In normal gateway flow, skip — the next on_session_start will close.
-    # Only force-close for interruptions or explicit completion signals
-    # where there may not be a subsequent on_session_start.
-    if completed and not interrupted:
-        # Normal completion — let the next on_session_start handle it.
-        # This keeps the MindGraph session open across multiple gateway turns.
-        # For CLI (single-turn), on_session_start won't fire again, so we
-        # register an atexit handler to catch that case (once only).
-        global _atexit_registered
-        if not _atexit_registered:
-            import atexit
+    def shutdown(self) -> None:
+        """Clean up on process exit.
 
-            def _atexit_close():
-                if _session_started:
-                    _close_mindgraph_session(_current_session_id or session_id)
+        Closes any open MindGraph session with accumulated transcript.
+        """
+        if self._session_started:
+            self._close_session(self._accumulated_messages or None)
 
-            atexit.register(_atexit_close)
-            _atexit_registered = True
-        return
+        # Wait for any in-flight sync thread
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
 
-    # Interrupted or abnormal end — close immediately
-    _close_mindgraph_session(session_id)
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _close_session(self, messages: list = None) -> None:
+        """Close the MindGraph session with optional transcript ingestion."""
+        if not self._session_started:
+            return
+
+        try:
+            from hermes_mindgraph_plugin.tools import auto_close_session
+
+            summary = (
+                f"Session {self._session_id[:8] if self._session_id else 'unknown'} "
+                f"(completed)"
+            )
+
+            if messages:
+                logger.info(
+                    "MindGraph session close: passing %d messages for ingestion",
+                    len(messages),
+                )
+
+            auto_close_session(
+                summary=summary,
+                transcript_messages=messages,
+            )
+            logger.info(
+                "MindGraph session closed: %s",
+                self._session_id[:8] if self._session_id else "unknown",
+            )
+        except Exception as exc:
+            logger.debug("MindGraph session close failed (non-fatal): %s", exc)
+        finally:
+            self._session_started = False
+            self._session_context_cache = None
+            self._accumulated_messages = []
 
 
 # ---------------------------------------------------------------------------
@@ -281,31 +345,11 @@ def _on_session_end(
 # ---------------------------------------------------------------------------
 
 def register(ctx):
-    """Register MindGraph memory tools and lifecycle hooks with the Hermes plugin system."""
+    """Register MindGraph as a memory provider with the Hermes plugin system.
 
-    # --- Register all 11 MindGraph tools ---
-    try:
-        from hermes_mindgraph_plugin.tools import TOOLS
-
-        for tool in TOOLS:
-            ctx.register_tool(
-                name=tool["name"],
-                toolset=tool["toolset"],
-                schema=tool["schema"],
-                handler=tool["handler"],
-                check_fn=tool.get("check_fn"),
-                requires_env=tool.get("requires_env"),
-                emoji=tool.get("emoji", ""),
-            )
-        logger.info("MindGraph plugin: registered %d tools", len(TOOLS))
-    except ImportError as exc:
-        logger.warning("MindGraph plugin: failed to import tools — %s", exc)
-    except Exception as exc:
-        logger.warning("MindGraph plugin: tool registration failed — %s", exc)
-
-    # --- Register lifecycle hooks ---
-    ctx.register_hook("on_session_start", _on_session_start)
-    ctx.register_hook("pre_llm_call", _pre_llm_call)
-    ctx.register_hook("on_session_end", _on_session_end)
-
-    logger.info("MindGraph memory plugin registered (11 tools + 3 lifecycle hooks)")
+    Called by the memory plugin discovery system. Registers a
+    MindGraphMemoryProvider instance via ctx.register_memory_provider().
+    """
+    provider = MindGraphMemoryProvider()
+    ctx.register_memory_provider(provider)
+    logger.info("MindGraph memory provider registered")

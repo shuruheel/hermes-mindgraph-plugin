@@ -1374,28 +1374,10 @@ def proactive_graph_retrieve(user_message: str, k: int = 5) -> Optional[str]:
     except Exception as e:
         latency_ms = (_time.monotonic() - t0) * 1000
         logger.debug("MindGraph proactive retrieval failed (non-fatal): %s (%.0fms)", e, latency_ms)
-        # TEMPORARY TRACE
-        with open("/tmp/mindgraph_proactive_trace.log", "a") as _tf:
-            _tf.write(f"EXCEPTION in retrieve_context: {e!r}\n")
         proactive_metrics.record(hit=False, error=True)
         return None
 
     latency_ms = (_time.monotonic() - t0) * 1000
-
-    # TEMPORARY TRACE
-    with open("/tmp/mindgraph_proactive_trace.log", "a") as _tf:
-        import json as _json
-        _tf.write(f"\nquery={stripped[:100]!r}\n")
-        _tf.write(f"result type={type(result)}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}\n")
-        if isinstance(result, dict):
-            chunks = result.get("chunks", [])
-            _tf.write(f"chunks={len(chunks)}\n")
-            for c in chunks[:3]:
-                _tf.write(f"  score={c.get('score')}, title={c.get('document_title','?')[:40]}\n")
-            graph = result.get("graph", {})
-            nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
-            _tf.write(f"graph_nodes={len(nodes)}\n")
-        _tf.write(f"latency={latency_ms:.0f}ms\n")
 
     if not result or not isinstance(result, dict):
         proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
