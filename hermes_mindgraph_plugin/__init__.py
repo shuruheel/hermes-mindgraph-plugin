@@ -23,7 +23,7 @@ What you get:
     management, context injection, and transcript ingestion.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import json
 import logging
