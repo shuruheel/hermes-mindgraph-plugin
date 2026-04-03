@@ -335,6 +335,48 @@ class TestOnSessionEnd:
         # State should be cleaned up even on failure
         assert not provider._session_started
 
+    def test_session_end_skips_pre_compressed_messages(self, provider):
+        """After pre-compress, session-end only sends remaining messages."""
+        provider._session_started = True
+        provider._session_id = "test1234"
+
+        # Simulate 4 turns accumulated
+        provider._accumulated_messages = [
+            {"role": "user", "content": "msg1"},
+            {"role": "assistant", "content": "resp1"},
+            {"role": "user", "content": "msg2"},
+            {"role": "assistant", "content": "resp2"},
+        ]
+        # Simulate pre-compress already ingested the first 2
+        provider._ingested_up_to = 2
+
+        mock_close = MagicMock()
+        with patch("hermes_mindgraph_plugin.tools.auto_close_session", mock_close):
+            provider.on_session_end([])
+
+        mock_close.assert_called_once()
+        call_kwargs = mock_close.call_args[1]
+        # Should only get the 2 messages after the high-water mark
+        assert len(call_kwargs["transcript_messages"]) == 2
+        assert call_kwargs["transcript_messages"][0]["content"] == "msg2"
+
+    def test_session_end_sends_all_when_no_pre_compress(self, provider):
+        """Without pre-compress, session-end sends full accumulated messages."""
+        provider._session_started = True
+        provider._session_id = "test1234"
+        provider._accumulated_messages = [
+            {"role": "user", "content": "msg1"},
+            {"role": "assistant", "content": "resp1"},
+        ]
+        assert provider._ingested_up_to == 0  # No pre-compress
+
+        mock_close = MagicMock()
+        with patch("hermes_mindgraph_plugin.tools.auto_close_session", mock_close):
+            provider.on_session_end([])
+
+        call_kwargs = mock_close.call_args[1]
+        assert len(call_kwargs["transcript_messages"]) == 2
+
 
 # ---------------------------------------------------------------------------
 # shutdown()
@@ -373,6 +415,106 @@ class TestShutdown:
 
         call_kwargs = mock_close.call_args[1]
         assert len(call_kwargs["transcript_messages"]) == 2
+
+    def test_shutdown_respects_high_water_mark(self, provider):
+        provider._session_started = True
+        provider._session_id = "test"
+        provider._accumulated_messages = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "old-resp"},
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": "new-resp"},
+        ]
+        provider._ingested_up_to = 2  # First 2 already ingested
+        mock_close = MagicMock()
+
+        with patch("hermes_mindgraph_plugin.tools.auto_close_session", mock_close):
+            provider.shutdown()
+
+        call_kwargs = mock_close.call_args[1]
+        assert len(call_kwargs["transcript_messages"]) == 2
+        assert call_kwargs["transcript_messages"][0]["content"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# Pre-compress high-water mark
+# ---------------------------------------------------------------------------
+
+class TestPreCompressHighWaterMark:
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_pre_compress_advances_hwm(self, mock_get, provider):
+        client = MagicMock()
+        mock_get.return_value = client
+
+        provider._session_started = True
+        # Messages must be long enough to pass the >50 char filter
+        long_msg = "This is a substantive message about the project roadmap and timeline " * 2
+        provider._accumulated_messages = [
+            {"role": "user", "content": long_msg},
+            {"role": "assistant", "content": long_msg},
+            {"role": "user", "content": "msg2"},
+        ]
+
+        with patch.dict("os.environ", {"MINDGRAPH_API_KEY": "test-key"}):
+            provider.on_pre_compress([
+                {"role": "user", "content": long_msg},
+                {"role": "assistant", "content": long_msg},
+            ])
+
+        # Should have advanced to current accumulated count
+        assert provider._ingested_up_to == 3
+        client.ingest_chunk.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_pre_compress_then_session_end_no_overlap(self, mock_get, provider):
+        """Full flow: accumulate → pre-compress → more turns → session-end."""
+        client = MagicMock()
+        mock_get.return_value = client
+
+        provider._session_started = True
+        provider._session_id = "test1234"
+
+        # Accumulate 2 turns (long enough to pass filter)
+        long_msg = "Detailed discussion about architecture decisions and trade-offs " * 2
+        provider.sync_turn(long_msg, long_msg)
+        provider.sync_turn(long_msg, long_msg)
+        assert len(provider._accumulated_messages) == 4
+
+        # Pre-compress fires
+        with patch.dict("os.environ", {"MINDGRAPH_API_KEY": "test-key"}):
+            provider.on_pre_compress([
+                {"role": "user", "content": long_msg},
+                {"role": "assistant", "content": long_msg},
+            ])
+        assert provider._ingested_up_to == 4
+
+        # 2 more turns arrive after compression
+        provider.sync_turn("msg3", "resp3")
+        assert len(provider._accumulated_messages) == 6
+
+        # Session ends
+        mock_close = MagicMock()
+        with patch("hermes_mindgraph_plugin.tools.auto_close_session", mock_close):
+            provider.on_session_end([])
+
+        call_kwargs = mock_close.call_args[1]
+        transcript = call_kwargs["transcript_messages"]
+        # Should only contain the 2 post-compression messages
+        assert len(transcript) == 2
+        assert transcript[0]["content"] == "msg3"
+        assert transcript[1]["content"] == "resp3"
+
+    def test_hwm_reset_on_close(self, provider):
+        provider._session_started = True
+        provider._session_id = "test"
+        provider._ingested_up_to = 5
+        mock_close = MagicMock()
+
+        with patch("hermes_mindgraph_plugin.tools.auto_close_session", mock_close):
+            provider.on_session_end([{"role": "user", "content": "hi"}])
+
+        assert provider._ingested_up_to == 0
 
 
 # ---------------------------------------------------------------------------

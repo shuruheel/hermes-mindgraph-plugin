@@ -63,6 +63,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
         self._is_cron_session: bool = False
         self._hermes_home: Optional[str] = None
         self._accumulated_messages: list = []
+        self._ingested_up_to: int = 0  # High-water mark: messages already pre-compress ingested
         self._sync_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
@@ -105,6 +106,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
         self._session_started = False
         self._session_context_cache = None
         self._accumulated_messages = []
+        self._ingested_up_to = 0
 
         # Open MindGraph session — skip for cron (no session node pollution)
         if not self._is_cron_session:
@@ -240,14 +242,21 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
     def on_session_end(self, messages: list) -> None:
         """Final extraction/flush on conversation end.
 
-        Closes the MindGraph session and ingests the full transcript
-        for 5-layer knowledge extraction.
+        Closes the MindGraph session and ingests only the portion of
+        the transcript that hasn't already been pre-compress ingested.
         """
         if not self._session_started:
             return
 
-        # Prefer the messages argument; fall back to accumulated
-        transcript = messages if messages else self._accumulated_messages
+        # Use _accumulated_messages sliced from high-water mark to avoid
+        # re-ingesting content already sent during pre-compression.
+        # If no pre-compress happened (_ingested_up_to == 0), sends everything.
+        if self._ingested_up_to > 0:
+            transcript = self._accumulated_messages[self._ingested_up_to:]
+        else:
+            # No pre-compress — use Hermes-provided messages if available,
+            # otherwise fall back to full accumulated list
+            transcript = messages if messages else self._accumulated_messages
         self._close_session(transcript)
 
     def on_pre_compress(self, messages: list) -> None:
@@ -255,6 +264,9 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
 
         Ingests a snapshot of the conversation being compressed so
         key context is not lost when the window rolls over.
+
+        Sets _ingested_up_to so that on_session_end() only sends
+        messages beyond this point, avoiding double ingestion.
         """
         if not self._session_started or not self.is_available():
             return
@@ -274,9 +286,11 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
                     client.ingest_chunk(
                         content=f"[pre-compression snapshot]\n{filtered[:limit]}"
                     )
+                    # Advance high-water mark so session-end doesn't re-ingest
+                    self._ingested_up_to = len(self._accumulated_messages)
                     logger.info(
-                        "MindGraph pre-compress snapshot ingested (%d chars, limit=%d)",
-                        min(len(filtered), limit), limit,
+                        "MindGraph pre-compress snapshot ingested (%d chars, limit=%d, hwm=%d)",
+                        min(len(filtered), limit), limit, self._ingested_up_to,
                     )
         except Exception as exc:
             logger.debug("MindGraph pre-compress ingest failed (non-fatal): %s", exc)
@@ -302,10 +316,12 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
     def shutdown(self) -> None:
         """Clean up on process exit.
 
-        Closes any open MindGraph session with accumulated transcript.
+        Closes any open MindGraph session with only the un-ingested
+        portion of the accumulated transcript.
         """
         if self._session_started:
-            self._close_session(self._accumulated_messages or None)
+            remaining = self._accumulated_messages[self._ingested_up_to:]
+            self._close_session(remaining or None)
 
         # Wait for any in-flight sync thread
         if self._sync_thread and self._sync_thread.is_alive():
@@ -348,6 +364,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
             self._session_started = False
             self._session_context_cache = None
             self._accumulated_messages = []
+            self._ingested_up_to = 0
 
 
 # ---------------------------------------------------------------------------
