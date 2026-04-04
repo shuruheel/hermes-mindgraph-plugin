@@ -535,16 +535,26 @@ def retrieve_session_context() -> Optional[str]:
         "- **Risk or opportunity surfaced** → commit(action='assess_risk'/'add_affordance').\n"
         "- **Open question worth tracking** → commit(action='question').\n\n"
         #
-        "### 2. Retrieve-Before-Act — ALWAYS retrieve before acting on stored knowledge\n"
+        "### 2. Two-Phase Retrieval — orient first, then fetch source text only when needed\n"
         "Retrieval uses hybrid search (FTS + semantic) — natural language queries work, "
-        "but specific keywords and names still improve results.\n"
+        "but specific keywords and names still improve results.\n\n"
+        "**Phase 1 — Orient (graph-only, lightweight):**\n"
+        "Call retrieve() with default settings (include_chunks=false). This returns node labels, "
+        "summaries, types, and confidence scores — enough to understand what's in the graph "
+        "and decide what you need.\n"
         "- **Before drafting any communication about/to a person** → retrieve(query='Alice Smith'). "
         "Draft from retrieved context, not session memory.\n"
         "- **Before making recommendations involving a person or org** → retrieve() first.\n"
         "- **When user references someone discussed before** → retrieve() before responding.\n"
         "- **When user says 'remember when...' or 'what did we...'** → retrieve() with key terms.\n"
+        "- **Start with document_index** when unsure what's been ingested: "
+        "retrieve(mode='document_index') lists all documents.\n"
         "- **Broaden on miss**: Try synonyms, related terms, or node_type filter. "
-        "For exact name lookups, use mode='search' (FTS-only, faster).\n"
+        "For exact name lookups, use mode='search' (FTS-only, faster).\n\n"
+        "**Phase 2 — Fetch source text (only when needed):**\n"
+        "If you need verbatim quotes, citations, or exact wording, re-query with "
+        "include_chunks=true. Do NOT request chunks by default — they are expensive and "
+        "usually unnecessary for reasoning.\n"
         "- **If retrieve returns nothing for someone you supposedly researched** → something broke. "
         "Flag it, don't proceed on session memory alone.\n\n"
         #
@@ -598,9 +608,13 @@ def retrieve_session_context() -> Optional[str]:
         "Update: pass uid to update status (e.g., mark a goal completed).\n"
         "Anti-pattern: Commits represent user intent. Never commit content-derived goals.\n\n"
         #
-        "**retrieve** — query the graph\n"
+        "**retrieve** — query the graph (two-phase: graph-only first, chunks on demand)\n"
+        "Returns graph nodes by default (labels, summaries, types, confidence). "
+        "Chunks (source text) are opt-in via include_chunks=true — request them only for "
+        "citations or verbatim quotes.\n"
         "Modes: context (hybrid FTS + semantic, default — natural language works), "
         "search (FTS-only, faster for exact name lookups), "
+        "document_index (list all ingested documents — orient before searching), "
         "recent (recently updated nodes), "
         "goals, questions, decisions, neighborhood (from a node UID), weak_claims, contradictions.\n"
         "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n"
@@ -608,7 +622,9 @@ def retrieve_session_context() -> Optional[str]:
         "  - Context mode handles natural language: 'what do we know about Alice and AI safety'\n"
         "  - For exact name lookups, search mode is faster: retrieve(query='Alice Smith', mode='search')\n"
         "  - Use node_type filter to narrow: retrieve(query='Smith', node_type='Person')\n"
-        "  - Combine with neighborhood mode: search for a node, then explore its connections\n\n"
+        "  - Start with document_index when unsure what content has been ingested\n"
+        "  - Combine with neighborhood mode: search for a node, then explore its connections\n"
+        "  - Only add include_chunks=true when you need the actual source text\n\n"
         #
         "**ingest** — long-form content\n"
         "Under 500 chars: sync. Over 500 chars: async.\n"
@@ -651,7 +667,9 @@ def retrieve_session_context() -> Optional[str]:
         "- **Stale goals**: Update promptly. Stale active goals pollute session-start context.\n"
         "- **Content-derived commits**: Don't create goals from articles or research. Only user intent.\n"
         "- **Cramming**: Entity properties = stable identity. Observations = everything else.\n"
-        "- **Performative retrieval**: Don't retrieve to show you can — only when it would change your response.\n\n"
+        "- **Performative retrieval**: Don't retrieve to show you can — only when it would change your response.\n"
+        "- **Eager chunk fetching**: Don't pass include_chunks=true by default. Graph nodes are sufficient for reasoning. "
+        "Only fetch chunks when you need verbatim text or citations.\n\n"
         #
         # ── Judgment calls ──
         #
@@ -1250,7 +1268,7 @@ def mindgraph_retrieve(
     query: str = "",
     mode: str = "context",
     limit: int = 10,
-    include_chunks: bool = True,
+    include_chunks: bool = False,
     include_graph: bool = True,
     node_type: str = "",
 ) -> str:
@@ -1258,8 +1276,10 @@ def mindgraph_retrieve(
 
     Modes:
       - context: hybrid retrieval (FTS + semantic) — handles natural language well (default).
-        Returns nodes, edges, and provenance chunks via POST /retrieve/context.
+        Returns graph nodes (labels, summaries, types, confidence) by default.
+        Pass include_chunks=true to also fetch provenance source text.
       - search: keyword-only full-text search (FTS) — faster for exact name lookups.
+      - document_index: list all ingested documents (inventory before searching).
       - recent: recently updated nodes, filterable by node_type.
       - goals: active goals sorted by salience
       - questions: open questions and hypotheses
@@ -1269,8 +1289,8 @@ def mindgraph_retrieve(
       - contradictions: contradictory claims in the graph
     """
     _VALID_MODES = (
-        "context", "search", "recent", "goals", "questions", "decisions",
-        "neighborhood", "weak_claims", "contradictions",
+        "context", "search", "recent", "document_index", "goals", "questions",
+        "decisions", "neighborhood", "weak_claims", "contradictions",
     )
     # Validate
     if mode in ("context", "search") and not query:
@@ -1299,6 +1319,8 @@ def mindgraph_retrieve(
             if node_type:
                 kwargs["node_types"] = [node_type]
             return client.retrieve(**kwargs)
+        elif mode == "document_index":
+            return client.get_nodes(node_type="Document", limit=limit)
         elif mode == "goals":
             return client.get_goals()
         elif mode == "questions":
@@ -1494,7 +1516,7 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
         raw = client.retrieve_context(
             stripped[:500],
             k=k,
-            include_chunks=True,
+            include_chunks=False,
             include_graph=True,
         )
     except Exception as e:
@@ -1737,12 +1759,16 @@ MINDGRAPH_REMEMBER_SCHEMA = {
 MINDGRAPH_RETRIEVE_SCHEMA = {
     "name": "mindgraph_retrieve",
     "description": (
-        "Query the semantic graph memory. Two search modes:\n"
+        "Query the semantic graph memory. Returns graph nodes (labels, summaries, types, "
+        "confidence) by default — chunks are opt-in via include_chunks.\n"
+        "Search modes:\n"
         "- context (default): Hybrid retrieval (FTS + semantic). Handles natural language well.\n"
         "- search: Keyword-only FTS. Faster for exact name lookups.\n"
+        "- document_index: List all ingested documents (inventory before searching).\n"
         "Other modes: recent, goals, questions, decisions, neighborhood (by UID), "
         "weak_claims, contradictions.\n"
-        "Basic context is auto-injected each turn; use this for deeper queries."
+        "Two-phase protocol: orient with graph-only results first, then fetch chunks "
+        "selectively with include_chunks=true when you need citations or verbatim text."
     ),
     "parameters": {
         "type": "object",
@@ -1754,8 +1780,9 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["context", "search", "recent", "goals", "questions", "decisions",
-                         "neighborhood", "weak_claims", "contradictions"],
+                "enum": ["context", "search", "recent", "document_index", "goals",
+                         "questions", "decisions", "neighborhood", "weak_claims",
+                         "contradictions"],
                 "description": "Retrieval mode. Default: context (hybrid FTS + semantic).",
             },
             "limit": {
@@ -1770,7 +1797,8 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
             },
             "include_chunks": {
                 "type": "boolean",
-                "description": "(context/search) Include provenance source text chunks. Default: true.",
+                "description": "(context/search) Include provenance source text chunks. Default: false. "
+                "Use for citations or verbatim quotes after orienting with graph-only results.",
             },
             "include_graph": {
                 "type": "boolean",
@@ -1913,7 +1941,7 @@ TOOLS = [
             query=args.get("query", ""),
             mode=args.get("mode", "context"),
             limit=args.get("limit", 10),
-            include_chunks=args.get("include_chunks", True),
+            include_chunks=args.get("include_chunks", False),
             include_graph=args.get("include_graph", True),
             node_type=args.get("node_type", ""),
         ),
