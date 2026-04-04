@@ -25,7 +25,7 @@ What you get:
     Per-turn hybrid retrieval (FTS + semantic) for natural language queries.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 import json
 import logging
