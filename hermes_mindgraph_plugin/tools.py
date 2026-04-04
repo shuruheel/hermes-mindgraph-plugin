@@ -1,20 +1,17 @@
 """MindGraph semantic graph memory integration.
 
-Provides 11 cognitive tools that map to MindGraph's layered architecture:
-  - mindgraph_session: open/close sessions (lifecycle)
-  - mindgraph_journal: low-friction capture (observations, notes, preferences)
-  - mindgraph_argue: structured epistemic claims with evidence
-  - mindgraph_commit: goals, decisions, projects, milestones
-  - mindgraph_retrieve: search + structured queries (goals, questions, etc.)
-  - mindgraph_capture: entities, observations, concepts (Reality layer)
-  - mindgraph_inquire: questions, hypotheses, anomalies (Epistemic layer)
-  - mindgraph_action: risks and affordances (Action layer)
-  - mindgraph_decide: decisions with options (Intent layer)
-  - mindgraph_plan: plans, tasks, execution, governance (Agent layer)
+Provides 4 tools for persistent semantic memory:
+  - mindgraph_remember: store knowledge (entities, observations, claims, preferences, notes)
+  - mindgraph_retrieve: query the graph (hybrid FTS+semantic, FTS-only, structured queries)
+  - mindgraph_commit: track agentic state (goals, decisions, plans, tasks, risks, questions)
   - mindgraph_ingest: long-form content ingestion
 
+Session lifecycle (open/close) is fully automatic via __init__.py hooks.
 Session-start context (active goals, projects, tasks) is injected into the
 system prompt via retrieve_session_context().
+
+Per-turn retrieval uses hybrid search (FTS + semantic via /retrieve/context)
+so natural-language user messages are handled well.
 
 Graceful degradation: all tools return error JSON on failure rather than
 crashing. If the API is down, tools are still registered but return
@@ -515,45 +512,46 @@ def retrieve_session_context() -> Optional[str]:
         "MindGraph is not a tool you use when asked — it is how you think. Every conversation "
         "produces knowledge. Your job is to route that knowledge to the right place in the graph "
         "so your future selves can act on it.\n\n"
+        "You have 4 tools: **remember** (store knowledge), **retrieve** (query knowledge), "
+        "**commit** (track goals/decisions/plans/risks/questions), **ingest** (bulk content).\n\n"
         #
         # ── Behavioral contract ──
         #
         "## Behavioral Contract (hard rules)\n\n"
         #
         "### 1. Persist Triggers — ALWAYS store these, don't wait to be asked\n"
-        "- **Person discussed substantively** → capture(entity_type='person') + at least one observation "
-        "(who they are, what they think, how they communicate). A Person node without observations is a "
-        "failure state — bare CRM data (name, role, email) is useless for future interactions.\n"
-        "- **Organization mentioned with context** → capture(entity_type='organization') + observation "
-        "linking it to relevant people or topics.\n"
-        "- **User states a preference or corrects you** → journal(entry_type='preference')\n"
-        "- **Analytical conclusion reached** → argue() with evidence and calibrated confidence. "
-        "If you formed a view, the graph needs it.\n"
-        "- **User expresses intent** → commit() as goal/project/milestone. User's own intent only — "
-        "never commit content-derived goals.\n"
-        "- **Decision point identified** → decide(action='open') + options.\n"
-        "- **Factual claim that could be wrong** → argue(), not journal(). Claims should be falsifiable.\n"
-        "- **Risk or opportunity surfaced** → action().\n"
-        "- **Open question worth tracking** → inquire().\n\n"
+        "- **Person discussed substantively** → remember(action='entity', entity_type='person') "
+        "+ at least one remember(action='observation'). A Person node without observations is a "
+        "failure state — bare CRM data is useless for future interactions.\n"
+        "- **Organization mentioned with context** → remember(action='entity', entity_type='organization') "
+        "+ observation linking it to relevant people or topics.\n"
+        "- **User states a preference or corrects you** → remember(action='preference')\n"
+        "- **Analytical conclusion reached** → remember(action='claim') with evidence and calibrated "
+        "confidence. If you formed a view, the graph needs it.\n"
+        "- **User expresses intent** → commit(action='goal'/'project'/'milestone'). User's own intent "
+        "only — never commit content-derived goals.\n"
+        "- **Decision point identified** → commit(action='open_decision') + add options.\n"
+        "- **Factual claim that could be wrong** → remember(action='claim'). Claims should be falsifiable.\n"
+        "- **Risk or opportunity surfaced** → commit(action='assess_risk'/'add_affordance').\n"
+        "- **Open question worth tracking** → commit(action='question').\n\n"
         #
         "### 2. Retrieve-Before-Act — ALWAYS retrieve before acting on stored knowledge\n"
-        "Retrieval uses full-text search (keyword matching, not semantic). Write queries as "
-        "keywords and names, not natural-language questions.\n"
+        "Retrieval uses hybrid search (FTS + semantic) — natural language queries work, "
+        "but specific keywords and names still improve results.\n"
         "- **Before drafting any communication about/to a person** → retrieve(query='Alice Smith'). "
         "Draft from retrieved context, not session memory.\n"
         "- **Before making recommendations involving a person or org** → retrieve() first.\n"
         "- **When user references someone discussed before** → retrieve() before responding.\n"
-        "- **When user says 'remember when...' or 'what did we...'** → retrieve() with key terms, "
-        "not the full question.\n"
-        "- **Broaden on miss**: If retrieve returns nothing, try synonyms, related terms, or "
-        "node_type filter. FTS matches exact words — rephrase if needed.\n"
+        "- **When user says 'remember when...' or 'what did we...'** → retrieve() with key terms.\n"
+        "- **Broaden on miss**: Try synonyms, related terms, or node_type filter. "
+        "For exact name lookups, use mode='search' (FTS-only, faster).\n"
         "- **If retrieve returns nothing for someone you supposedly researched** → something broke. "
         "Flag it, don't proceed on session memory alone.\n\n"
         #
         "### 3. Research Loop (any time you research a person, not just outreach)\n"
         "Research → Persist → Retrieve → Act. Each step gates the next.\n"
         "1. Research: gather substantive sources (blog, talks, papers, interviews)\n"
-        "2. Persist: store Person entity + observations (intellectual profile, communication style, "
+        "2. Persist: remember(entity) + observations (intellectual profile, communication style, "
         "technical positions, hook/relevance rationale). Do NOT proceed until these are in MindGraph.\n"
         "3. Retrieve: query MindGraph for what you just stored + any prior context. "
         "Use the RETRIEVED context to act.\n"
@@ -563,107 +561,80 @@ def retrieve_session_context() -> Optional[str]:
         #
         "## Which Tool? (decision tree)\n"
         "Something worth remembering?\n"
-        "- Belief, conclusion, or position that could be wrong? → **argue**\n"
-        "- Goal, project, or milestone? → **commit**\n"
-        "- Choice point with options? → **decide**\n"
-        "- Risk or opportunity? → **action**\n"
-        "- Plan, task, or policy? → **plan**\n"
-        "- Question, hypothesis, or anomaly? → **inquire**\n"
-        "- Person, org, nation, place, event, or concept? → **capture**(entity) — each type creates a distinct node\n"
-        "- Factual observation about the world? → **capture**(observation)\n"
+        "- Person, org, place, event, concept? → **remember**(action='entity')\n"
+        "- Factual observation about an entity? → **remember**(action='observation')\n"
+        "- Belief, conclusion, or falsifiable claim? → **remember**(action='claim')\n"
+        "- Preference, note, insight, or reflection? → **remember**(action='preference'/'note')\n"
+        "- Goal, project, or milestone? → **commit**(action='goal'/'project'/'milestone')\n"
+        "- Choice point with options? → **commit**(action='open_decision')\n"
+        "- Risk or opportunity? → **commit**(action='assess_risk'/'add_affordance')\n"
+        "- Plan, task, or policy? → **commit**(action='create_plan'/'create_task'/'create_policy')\n"
+        "- Question, hypothesis, or anomaly? → **commit**(action='question'/'hypothesis'/'anomaly')\n"
         "- Long document, article, or transcript? → **ingest**\n"
-        "- Preference, note, insight, or reflection? → **journal**\n"
         "- Need to find something? → **retrieve**\n\n"
         #
         # ── Tool patterns ──
         #
         "## Tool Patterns\n\n"
         #
-        "**journal** — low-friction capture (default when genuinely unsure)\n"
-        "Entry types: observation (factual, default), preference (likes/dislikes), "
-        "note (general), reflection (meta/process), insight (connections/patterns).\n"
-        "Anti-pattern: Don't journal claims → argue. Don't journal goals → commit. "
-        "Don't journal entity facts → capture(observation).\n\n"
+        "**remember** — store knowledge in the graph\n"
+        "Actions: entity (create typed nodes — person, org, concept, etc.), "
+        "observation (facts linked to entities via entity_uid), "
+        "claim (epistemic claims with evidence + confidence 0.0-1.0, default 0.7), "
+        "preference (user preferences), note (general notes/reflections/insights).\n"
+        "KEY PRINCIPLE: Entity nodes are for stable identity. Observations are for everything "
+        "you learn ABOUT them. Use descriptive keywords in observation labels for findability. "
+        "Don't cram findings into entity properties.\n"
+        "Anti-pattern: Don't use 'note' for claims → use 'claim'. Don't use 'note' for goals → "
+        "use commit. Claims should be falsifiable.\n\n"
         #
-        "**argue** — structured epistemic claims\n"
-        "Confidence: 0.9+ near-certain; 0.7-0.8 confident (default 0.7); "
-        "0.5-0.6 uncertain; 0.3-0.4 speculative; 0.1-0.2 intuition.\n"
-        "Anti-pattern: Don't argue bare observations or preferences. Claims should be falsifiable.\n\n"
+        "**commit** — track goals, decisions, plans, risks, questions\n"
+        "Intent: goal/project/milestone (with dedup + update via uid), "
+        "open_decision → add_option → resolve_decision.\n"
+        "Action: assess_risk, add_affordance.\n"
+        "Agent: create_plan, create_task, add_step, update_status, start, complete, fail, create_policy.\n"
+        "Epistemic: question (surfaces at session start), hypothesis, anomaly.\n"
+        "Dedup: goals/projects/milestones automatically deduplicate — safe to call repeatedly.\n"
+        "Update: pass uid to update status (e.g., mark a goal completed).\n"
+        "Anti-pattern: Commits represent user intent. Never commit content-derived goals.\n\n"
         #
-        "**commit** — goals, projects, milestones (with dedup + update)\n"
-        "Status: active → completed/paused/abandoned. Don't auto-complete — let user confirm.\n"
-        "Dedup: automatically finds existing commitments with the same label — safe to call repeatedly.\n"
-        "Update: pass uid to update an existing commitment's status (e.g., mark a goal completed).\n"
-        "Anti-pattern: Commits represent user intent and agency. Never commit content-derived goals.\n\n"
-        #
-        "**decide** — decisions with deliberation\n"
-        "Actions: open → add_option → add_constraint → resolve.\n\n"
-        #
-        "**capture** — Reality layer entities and facts\n"
-        "Entity types (each creates a DISTINCT typed node):\n"
-        "  person: occupation, nationality, birth_date, death_date, identifiers, attributes\n"
-        "  organization: domain, description\n"
-        "  nation, place, event: description\n"
-        "  concept: domain, description\n"
-        "  work, other: generic fallback\n"
-        "Also: capture_type='observation' for factual observations — pass entity_uid to link "
-        "the observation to a specific entity (creates HAS_OBSERVATION edge).\n"
-        "KEY PRINCIPLE: Entity nodes are for stable identity. Observations are for everything you learn "
-        "ABOUT them. Use descriptive keywords in observation labels — FTS retrieves by keyword match, "
-        "so clear terms make observations findable. Don't cram findings into entity properties.\n\n"
-        #
-        "**inquire** — questions, hypotheses, anomalies\n"
-        "question: open questions (surface at session start). hypothesis: testable conjectures. "
-        "anomaly: things that don't fit.\n\n"
-        #
-        "**action** — risks and affordances\n"
-        "assess_risk: threats, failure modes. add_affordance: capabilities, leverage points, opportunities.\n\n"
-        #
-        "**plan** — plans, tasks, execution, governance\n"
-        "Planning: create_plan, create_task, add_step, update_status, get_plan.\n"
-        "Execution: start → complete/fail.\n"
-        "Governance: create_policy (rules/constraints the agent should follow).\n\n"
+        "**retrieve** — query the graph\n"
+        "Modes: context (hybrid FTS + semantic, default — natural language works), "
+        "search (FTS-only, faster for exact name lookups), "
+        "recent (recently updated nodes), "
+        "goals, questions, decisions, neighborhood (from a node UID), weak_claims, contradictions.\n"
+        "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n"
+        "**Query tips:**\n"
+        "  - Context mode handles natural language: 'what do we know about Alice and AI safety'\n"
+        "  - For exact name lookups, search mode is faster: retrieve(query='Alice Smith', mode='search')\n"
+        "  - Use node_type filter to narrow: retrieve(query='Smith', node_type='Person')\n"
+        "  - Combine with neighborhood mode: search for a node, then explore its connections\n\n"
         #
         "**ingest** — long-form content\n"
         "Under 500 chars: sync. Over 500 chars: async.\n"
         "Anti-pattern: Don't ingest trivial content or duplicates.\n\n"
         #
-        "**retrieve** — querying the graph (FTS-based)\n"
-        "Modes: search (FTS, default — supports node_type filter, returns nodes + edges + chunks), "
-        "goals, questions, decisions, neighborhood (from a node UID), weak_claims, contradictions.\n"
-        "Topic-relevant context is auto-injected each turn — use retrieve for deeper/specific queries.\n"
-        "**Query tips (FTS = keyword matching):**\n"
-        "  - Use names and key terms, not questions: 'Alice Smith AI safety' not 'what does Alice think about AI?'\n"
-        "  - Use node_type filter to narrow: retrieve(query='Smith', node_type='Person')\n"
-        "  - If no results, try fewer/broader keywords or drop qualifiers\n"
-        "  - Combine with neighborhood mode: search for a node, then explore its connections\n\n"
-        #
         # ── Social graph ──
         #
         "## Building a Social Graph\n\n"
-        "Every conversation should contribute to a living social graph. This is not optional "
-        "and not limited to specific workflows — it's how the graph becomes genuinely useful.\n\n"
+        "Every conversation should contribute to a living social graph.\n\n"
         "Pattern:\n"
-        "1. capture(entity_type='person', props={occupation, nationality}) — typed Person node (returns uid)\n"
-        "2. capture(entity_type='organization') — their company/institution\n"
-        "3. capture(observation, entity_uid=person_uid) per distinct insight — one observation per fact, linked to entity:\n"
-        "   - Intellectual profile: what they think about, their core frames\n"
-        "   - Communication style: formal/informal, academic/practitioner, contrarian/consensus\n"
-        "   - Technical positions: specific claims they've taken\n"
-        "   - Career arc: trajectory, pivots (if notable)\n"
-        "   - Relationships: 'X co-founded Y', 'X worked at Z before joining W'\n"
-        "4. argue() when you form a view — 'X would be a strong collaborator because...' "
+        "1. remember(action='entity', entity_type='person', properties={occupation, nationality}) → Person node (returns uid)\n"
+        "2. remember(action='entity', entity_type='organization') → their company/institution\n"
+        "3. remember(action='observation', entity_uid=person_uid) per distinct insight:\n"
+        "   - Intellectual profile, communication style, technical positions, career arc, relationships\n"
+        "4. remember(action='claim') when you form a view — 'X would be a strong collaborator because...' "
         "with evidence and confidence\n\n"
         "The bar: 'would I want to retrieve this in a future conversation?' If yes, create the node.\n\n"
         #
         # ── Compound patterns ──
         #
         "## Compound Patterns\n"
-        "- **Learning:** ingest → argue key conclusions → journal insights → commit goals\n"
-        "- **Deciding:** retrieve context → argue reasoning → decide → journal what was rejected\n"
-        "- **Completing a goal:** retrieve goals → commit(uid=goal_uid, status='completed') → journal lessons\n"
-        "- **Researching a person:** capture(person) → capture(org) → multiple observations → "
-        "argue(relevance) → plan(follow-up)\n"
+        "- **Learning:** ingest → remember(claim) key conclusions → remember(note) insights → commit(goal)\n"
+        "- **Deciding:** retrieve context → remember(claim) reasoning → commit(open_decision) → remember(note) rejected options\n"
+        "- **Completing a goal:** retrieve(mode='goals') → commit(action='goal', uid=goal_uid, status='completed') → remember(note) lessons\n"
+        "- **Researching a person:** remember(entity person) → remember(entity org) → multiple observations → "
+        "remember(claim relevance) → commit(create_plan follow-up)\n"
         "- **New session:** session-start context is auto-injected. "
         "Retrieve specifics before proceeding.\n\n"
         #
@@ -674,8 +645,8 @@ def retrieve_session_context() -> Optional[str]:
         "Always pair with at least one qualitative observation.\n"
         "- **Session-memory drafting**: Never draft communications from what you researched "
         "'5 minutes ago' — retrieve from graph. Session memory dies; graph persists.\n"
-        "- **Over-journaling**: Skip transient, obvious, or easily re-discovered facts.\n"
-        "- **Under-arguing**: If you formed a conclusion, argue it. The graph needs claims to reason over.\n"
+        "- **Over-noting**: Skip transient, obvious, or easily re-discovered facts.\n"
+        "- **Under-claiming**: If you formed a conclusion, store it as a claim. The graph needs claims to reason over.\n"
         "- **Confidence inflation**: 0.7 is a good default. Don't inflate to 0.9 without strong evidence.\n"
         "- **Stale goals**: Update promptly. Stale active goals pollute session-start context.\n"
         "- **Content-derived commits**: Don't create goals from articles or research. Only user intent.\n"
@@ -688,7 +659,7 @@ def retrieve_session_context() -> Optional[str]:
         "- During coding/execution, persistence is less frequent. During planning, research, "
         "or reflective conversations, persist more.\n"
         "- Post-session extraction runs automatically — focus on high-signal items during session.\n"
-        "- When in doubt between journal and argue: is this falsifiable? If yes → argue. If no → journal."
+        "- When in doubt between note and claim: is this falsifiable? If yes → claim. If no → note."
     )
 
     if sections:
@@ -858,457 +829,40 @@ def get_active_session_uid() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Tool: mindgraph_session
+# Tool: mindgraph_remember — unified knowledge capture
+# (merges journal + capture + argue)
 # ---------------------------------------------------------------------------
 
-def mindgraph_session(action: str, summary: str = "", label: str = "") -> str:
-    """Open or close a MindGraph session.
-
-    action: "open" or "close"
-    label: (open only) session label
-    summary: (close only) session summary for distillation
-    """
-    global _active_session_uid
-
-    if action == "open":
-        kwargs = {"action": "open"}
-        if label:
-            kwargs["label"] = label
-        result, err = _safe_call(
-            lambda c: c.session(**kwargs),
-        )
-        if err:
-            return _json_response(False, error=f"Failed to open session: {err}")
-        # Track the session UID for close
-        if isinstance(result, dict) and result.get("uid"):
-            with _session_lock:
-                _active_session_uid = result["uid"]
-        with _session_lock:
-            sid = _active_session_uid
-        return _json_response(True, data={
-            "session_id": sid,
-            "session": result,
-            "message": "MindGraph session opened",
-        })
-
-    elif action == "close":
-        with _session_lock:
-            if not _active_session_uid:
-                return _json_response(False, error="No active session to close")
-            closed_uid = _active_session_uid
-            _active_session_uid = None  # Clear immediately to prevent double-close
-
-        # Close session (requires session_uid)
-        close_kwargs = {"action": "close", "session_uid": closed_uid}
-        if summary:
-            close_kwargs["summary"] = summary
-        result, err = _safe_call(
-            lambda c: c.session(**close_kwargs),
-        )
-
-        if err:
-            return _json_response(False, error=f"Failed to close session: {err}")
-
-        # Attempt distillation if we have a summary
-        if summary:
-            dist_result, dist_err = _safe_call(
-                lambda c: c.distill(label=summary[:120], summary=summary),
-            )
-            if dist_err:
-                logger.debug("MindGraph distill failed: %s", dist_err)
-
-        return _json_response(True, data={
-            "session_id": closed_uid,
-            "session": result,
-            "message": "MindGraph session closed",
-        })
-
-    else:
-        return _json_response(False, error=f"Unknown action: {action}. Use 'open' or 'close'.")
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_journal
-# ---------------------------------------------------------------------------
-
-def mindgraph_journal(entry: str, entry_type: str = "observation") -> str:
-    """Low-friction capture: observations, notes, preferences, reflections.
-
-    entry_type: observation, preference, note, reflection, insight
-    """
-    if not entry or not entry.strip():
-        return _json_response(False, error="Entry text is required")
-    # SDK journal() signature: journal(label, props=None, *, summary=None, ...)
-    result, err = _safe_call(
-        lambda c: c.journal(entry, props={"entry_type": entry_type}),
-    )
-    if err:
-        return _json_response(False, error=f"Journal capture failed: {err}")
-    return _json_response(True, data={"node": result, "message": f"Journaled {entry_type}"})
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_argue
-# ---------------------------------------------------------------------------
-
-def mindgraph_argue(
-    claim: str,
+def mindgraph_remember(
+    label: str,
+    action: str = "note",
+    entity_type: str = "concept",
+    properties: dict = None,
+    entity_uid: str = "",
     evidence: str = "",
     warrant: str = "",
     confidence: float = 0.7,
 ) -> str:
-    """Structured epistemic claim with evidence and warrant.
+    """Unified knowledge capture — entities, observations, claims, preferences, notes.
 
-    Use for beliefs, conclusions, and reasoned positions that need
-    to be tracked and potentially challenged later.
-    """
-    if not claim or not claim.strip():
-        return _json_response(False, error="Claim text is required")
-    # SDK argue() takes **kwargs -> POST /epistemic/argument
-    # claim must be a dict: {"label": str, "confidence": float}
-    # evidence must be a list of dicts: [{"label": str}]
-    claim_obj = {"label": claim, "confidence": confidence}
-    kwargs = {"claim": claim_obj}
-    if evidence:
-        kwargs["evidence"] = [{"label": evidence}]
-    if warrant:
-        kwargs["warrant"] = {"label": warrant}
+    Actions:
+      - entity: Create/find an entity (person, org, concept, place, event, etc.)
+      - observation: Factual observation; pass entity_uid to link to an entity
+      - claim: Epistemic claim with evidence and calibrated confidence
+      - preference: User preference or correction
+      - note: General note, reflection, or insight (default)
 
-    result, err = _safe_call(
-        lambda c: c.argue(**kwargs),
-    )
-    if err:
-        return _json_response(False, error=f"Argue failed: {err}")
-    return _json_response(True, data={"result": result, "message": f"Claim recorded (confidence: {confidence})"})
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_commit
-# ---------------------------------------------------------------------------
-
-def mindgraph_commit(
-    label: str = "",
-    commit_type: str = "goal",
-    status: str = "active",
-    description: str = "",
-    uid: str = "",
-) -> str:
-    """Record or update goals, projects, and milestones.
-
-    commit_type: goal, project, milestone (NOT decision — use mindgraph_decide)
-    status: active, completed, paused, abandoned
-    uid: (optional) UID of existing commitment to update
-
-    Deduplication: before creating, searches for an existing node with the same
-    label and type. If found, returns the existing node (updating status if changed).
-    Pass uid explicitly to update a known commitment.
-    """
-    if not label and not uid:
-        return _json_response(False, error="Label or uid is required")
-
-    # ── Explicit update by UID ──
-    if uid:
-        update_kwargs = {}
-        if status:
-            update_kwargs["status"] = status
-        if description:
-            update_kwargs["description"] = description
-        if label:
-            update_kwargs["label"] = label
-        result, err = _safe_call(
-            lambda c: c.update_node(uid, **update_kwargs),
-        )
-        if err:
-            return _json_response(False, error=f"Update failed: {err}")
-        return _json_response(True, data={
-            "result": result,
-            "uid": uid,
-            "message": f"Updated {commit_type}: {label or uid}",
-        })
-
-    # ── Client-side dedup: search for existing commitment with same label ──
-    # Two-pass: exact match first (cheap), then fuzzy match via normalized
-    # SequenceMatcher (catches "Ship v2" ≈ "Ship version 2.0").
-    # Threshold is configurable: MINDGRAPH_DEDUP_FUZZY_THRESHOLD (default 0.85).
-    _node_type_map = {"goal": "Goal", "project": "Project", "milestone": "Milestone"}
-    node_type = _node_type_map.get(commit_type)
-
-    if node_type and label:
-        try:
-            client = _get_client()
-            if client:
-                raw = _fts_search(client, label, node_type=node_type, limit=5)
-                # Normalize — _fts_search may return enriched dict or flat list
-                existing = raw.get("results", []) if isinstance(raw, dict) else raw
-                if isinstance(existing, list):
-                    # Pass 1: exact match (case-insensitive)
-                    match = None
-                    match_kind = ""
-                    label_lower = label.strip().lower()
-                    for node in existing:
-                        existing_label = (node.get("label") or "").strip().lower()
-                        if existing_label == label_lower:
-                            match = node
-                            match_kind = "exact"
-                            break
-
-                    # Pass 2: fuzzy match if no exact hit
-                    if match is None and DEDUP_FUZZY_THRESHOLD < 1.0:
-                        best_score = 0.0
-                        for node in existing:
-                            existing_label = node.get("label") or ""
-                            if not existing_label:
-                                continue
-                            score = _label_similarity(label, existing_label)
-                            if score >= DEDUP_FUZZY_THRESHOLD and score > best_score:
-                                best_score = score
-                                match = node
-                                match_kind = f"fuzzy ({best_score:.0%})"
-
-                    if match is not None:
-                        node_uid = match.get("uid", "")
-                        existing_status = _get_prop(match, "status", "")
-                        needs_update = (
-                            (status and existing_status != status)
-                            or description
-                        )
-                        if needs_update and node_uid:
-                            update_kw = {}
-                            if status and existing_status != status:
-                                update_kw["status"] = status
-                            if description:
-                                update_kw["description"] = description
-                            try:
-                                client.update_node(node_uid, **update_kw)
-                                match.update(update_kw)
-                            except Exception as ue:
-                                logger.debug("Dedup update failed (non-fatal): %s", ue)
-                        return _json_response(True, data={
-                            "result": match,
-                            "uid": node_uid,
-                            "message": f"Found existing {commit_type}: {match.get('label', label)} ({match_kind} dedup)",
-                            "deduplicated": True,
-                        })
-        except Exception:
-            pass  # Fall through to create
-
-    # ── Create new commitment ──
-    kwargs = {"action": commit_type, "label": label, "status": status}
-    if description:
-        kwargs["description"] = description
-
-    result, err = _safe_call(
-        lambda c: c.commit(**kwargs),
-    )
-    if err:
-        return _json_response(False, error=f"Commit failed: {err}")
-    return _json_response(True, data={"result": result, "message": f"Committed {commit_type}: {label}"})
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_retrieve
-# ---------------------------------------------------------------------------
-
-def mindgraph_retrieve(
-    query: str = "",
-    mode: str = "search",
-    limit: int = 10,
-    include_chunks: bool = True,
-    include_graph: bool = True,
-    node_type: str = "",
-) -> str:
-    """Search and query the semantic graph.
-
-    All retrieval uses FTS or structured endpoints (no embedding/vector search).
-
-    Modes:
-      - search: full-text search (FTS) via POST /search — the default for most queries.
-        Returns nodes, edges, and provenance chunks. Supports node_type filter.
-      - goals: active goals sorted by salience
-      - questions: open questions and hypotheses
-      - decisions: open decisions needing resolution
-      - neighborhood: get nodes connected to a specific node (query=node_uid)
-      - weak_claims: claims with low confidence
-      - contradictions: contradictory claims in the graph
-    """
-    # Validate query for modes that need it
-    if mode == "search" and not query:
-        return _json_response(False, error="Query required for search mode")
-    if mode == "neighborhood" and not query:
-        return _json_response(False, error="Node UID required for neighborhood mode")
-    if mode not in ("search", "goals", "questions", "decisions", "neighborhood", "weak_claims", "contradictions"):
-        return _json_response(False, error=f"Unknown mode: {mode}. Use: search, goals, questions, decisions, neighborhood, weak_claims, contradictions")
-
-    def _do_retrieve(client):
-        if mode == "search":
-            return _fts_search(
-                client, query, limit=limit, node_type=node_type or None,
-                include_edges=include_graph, include_chunks=include_chunks,
-            )
-        elif mode == "goals":
-            return client.get_goals()
-        elif mode == "questions":
-            return client.get_open_questions()
-        elif mode == "decisions":
-            return client.get_open_decisions()
-        elif mode == "neighborhood":
-            return client.neighborhood(query, max_depth=1)
-        elif mode == "weak_claims":
-            return client.get_weak_claims()
-        elif mode == "contradictions":
-            return client.get_contradictions()
-
-    # Hard caps for structured modes (these endpoints return everything)
-    _STRUCTURED_CAPS = {
-        "goals": 10,
-        "questions": 10,
-        "decisions": 10,
-        "weak_claims": 10,
-        "contradictions": 10,
-        "neighborhood": 20,
-    }
-    effective_limit = min(limit, _STRUCTURED_CAPS.get(mode, limit))
-
-    result, err = _safe_call(_do_retrieve)
-    if err:
-        return _json_response(False, error=f"Retrieve failed: {err}")
-
-    # Normalize results — handle both enriched dict and flat list responses:
-    # - Enriched (search with include_*): {"results": [...], "edges": [...], "chunks": [...]}
-    # - Flat list: [{node}, ...] or [{node: {...}, score: N}, ...]
-    edges = []
-    chunks = []
-    if isinstance(result, dict):
-        nodes = result.get("results", result.get("nodes", []))
-        edges = result.get("edges", [])
-        chunks = result.get("chunks", [])
-    elif isinstance(result, list):
-        nodes = result
-    else:
-        nodes = [result] if result else []
-
-    # Format nodes — lean output for structured modes, full for search
-    formatted = []
-    for item in nodes[:effective_limit]:
-        if not isinstance(item, dict):
-            formatted.append(str(item))
-            continue
-
-        # Unwrap {node: {...}, score: N} envelope
-        n = item.get("node", item) if "node" in item else item
-
-        if mode in ("goals", "questions", "decisions"):
-            # Lean: only uid, label, status
-            entry = {
-                "uid": n.get("uid", ""),
-                "label": n.get("label", ""),
-            }
-            status = _get_prop(n, "status", "")
-            if status:
-                entry["status"] = status
-            formatted.append(entry)
-
-        elif mode == "weak_claims":
-            # Lean: uid, label, confidence
-            entry = {
-                "uid": n.get("uid", ""),
-                "label": n.get("label", ""),
-            }
-            conf = n.get("confidence", _get_prop(n, "confidence", ""))
-            if conf:
-                entry["confidence"] = conf
-            formatted.append(entry)
-
-        elif mode == "contradictions":
-            # Lean: uid, label, confidence
-            entry = {
-                "uid": n.get("uid", ""),
-                "label": n.get("label", ""),
-            }
-            conf = n.get("confidence", _get_prop(n, "confidence", ""))
-            if conf:
-                entry["confidence"] = conf
-            formatted.append(entry)
-
-        else:
-            # Full format for search / neighborhood
-            score = item.get("score", "")
-            entry = {
-                "uid": n.get("uid", ""),
-                "label": n.get("label", ""),
-                "type": n.get("node_type", n.get("type", "")),
-            }
-            status = _get_prop(n, "status", "")
-            if status:
-                entry["status"] = status
-            if score:
-                entry["score"] = score
-            # Include summary only if label is short/generic
-            summary = n.get("summary", "")
-            if summary and (not entry["label"] or entry["label"].startswith("chunk-")):
-                entry["summary"] = summary[:200]
-            formatted.append(entry)
-
-    data = {
-        "results": formatted,
-        "count": len(formatted),
-        "mode": mode,
-    }
-    if query:
-        data["query"] = query
-
-    # Include edges and chunks when present (FTS enriched response)
-    if edges:
-        data["edges"] = [
-            {
-                "type": e.get("edge_type", e.get("type", "")),
-                "source": e.get("source_label", e.get("from_label", e.get("source_uid", ""))),
-                "target": e.get("target_label", e.get("to_label", e.get("target_uid", ""))),
-            }
-            for e in edges[:effective_limit]
-        ]
-        data["edge_count"] = len(edges)
-    if chunks:
-        data["chunks"] = [
-            {
-                "content": c.get("content", c.get("text", ""))[:500],
-                "document_title": c.get("document_title", c.get("source", "")),
-            }
-            for c in chunks[:effective_limit]
-        ]
-        data["chunk_count"] = len(chunks)
-
-    return _json_response(True, data=data)
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_capture — Reality layer (entities, observations)
-# ---------------------------------------------------------------------------
-
-def mindgraph_capture(
-    label: str,
-    capture_type: str = "entity",
-    entity_type: str = "concept",
-    properties: dict = None,
-    entity_uid: str = "",
-) -> str:
-    """Capture facts in the Reality layer — entities, observations, and concepts.
-
-    capture_type:
-      - entity: A concrete thing — each entity_type creates a distinct node type with its
-        own properties and edge types in the graph. Uses deduplication — safe to call repeatedly.
-      - observation: A factual observation about the world — something noticed or reported.
-        Pass entity_uid to explicitly link the observation to an entity.
-      - concept: An abstract concept in the Epistemic layer (via structure endpoint).
-
-    entity_type (entity only): concept, person, organization, nation, place, event, work, other
-    properties: additional properties dict (type-specific props passed to the server)
-    entity_uid: (observation only) UID of an entity to link this observation to via HAS_OBSERVATION edge
+    entity_type (entity only): person, organization, concept, nation, place, event, work, other
+    properties (entity only): additional properties dict
+    entity_uid (observation only): UID of entity to link via HAS_OBSERVATION edge
+    evidence (claim only): supporting evidence
+    warrant (claim only): reasoning connecting evidence to claim
+    confidence (claim only): 0.0-1.0, default 0.7
     """
     if not label or not label.strip():
         return _json_response(False, error="Label is required")
 
-    if capture_type == "entity":
+    if action == "entity":
         props = {}
         if properties and isinstance(properties, dict):
             props.update(properties)
@@ -1328,7 +882,6 @@ def mindgraph_capture(
                 lambda c, m=creator_method, p=props: getattr(c, m)(label, props=p if p else None),
             )
         else:
-            # "work", "other", or unrecognized — fall back to generic with entity_type in props
             props["entity_type"] = entity_type
             result, err = _safe_call(
                 lambda c: c.find_or_create_entity(label, props=props),
@@ -1337,7 +890,7 @@ def mindgraph_capture(
             return _json_response(False, error=f"Entity creation failed: {err}")
         return _json_response(True, data={"result": result, "message": f"Entity ({entity_type}): {label}"})
 
-    elif capture_type == "observation":
+    elif action == "observation":
         kwargs = {"action": "observation", "label": label}
         if properties and isinstance(properties, dict):
             kwargs.update(properties)
@@ -1369,104 +922,198 @@ def mindgraph_capture(
             msg += f" (linked to {entity_uid[:8]})"
         return _json_response(True, data={"result": result, "message": msg})
 
-    elif capture_type == "concept":
+    elif action == "claim":
+        claim_obj = {"label": label, "confidence": confidence}
+        kwargs = {"claim": claim_obj}
+        if evidence:
+            kwargs["evidence"] = [{"label": evidence}]
+        if warrant:
+            kwargs["warrant"] = {"label": warrant}
         result, err = _safe_call(
-            lambda c: c.structure(action="concept", label=label),
+            lambda c: c.argue(**kwargs),
         )
         if err:
-            return _json_response(False, error=f"Concept creation failed: {err}")
-        return _json_response(True, data={"result": result, "message": f"Concept: {label}"})
+            return _json_response(False, error=f"Claim failed: {err}")
+        return _json_response(True, data={"result": result, "message": f"Claim recorded (confidence: {confidence})"})
+
+    elif action == "preference":
+        result, err = _safe_call(
+            lambda c: c.journal(label, props={"entry_type": "preference"}),
+        )
+        if err:
+            return _json_response(False, error=f"Preference capture failed: {err}")
+        return _json_response(True, data={"node": result, "message": "Preference recorded"})
+
+    elif action == "note":
+        result, err = _safe_call(
+            lambda c: c.journal(label, props={"entry_type": "note"}),
+        )
+        if err:
+            return _json_response(False, error=f"Note capture failed: {err}")
+        return _json_response(True, data={"node": result, "message": "Note recorded"})
 
     else:
-        return _json_response(False, error=f"Unknown capture_type: {capture_type}. Use: entity, observation, concept")
+        return _json_response(False, error=f"Unknown action: {action}. Use: entity, observation, claim, preference, note")
+
+
+# Keep mindgraph_journal as internal helper for __init__.py on_memory_write
+def mindgraph_journal(entry: str, entry_type: str = "observation") -> str:
+    """Internal helper — routes to mindgraph_remember."""
+    action_map = {"preference": "preference", "observation": "note",
+                  "note": "note", "reflection": "note", "insight": "note"}
+    return mindgraph_remember(label=entry, action=action_map.get(entry_type, "note"))
 
 
 # ---------------------------------------------------------------------------
-# Tool: mindgraph_inquire — Epistemic layer (open questions)
+# Tool: mindgraph_commit — unified agentic state
+# (merges commit + decide + action + plan + inquire)
 # ---------------------------------------------------------------------------
 
-def mindgraph_inquire(label: str, inquiry_type: str = "question") -> str:
-    """Create questions, hypotheses, or anomalies in the Epistemic layer.
-
-    inquiry_type:
-      - question: An open question worth tracking (shows up as "Open Questions" at session start)
-      - hypothesis: A testable hypothesis or conjecture
-      - anomaly: Something that doesn't fit existing models — worth investigating
-    """
-    if not label or not label.strip():
-        return _json_response(False, error="Label is required")
-    if inquiry_type not in ("question", "hypothesis", "anomaly"):
-        return _json_response(False, error=f"Unknown inquiry_type: {inquiry_type}. Use: question, hypothesis, anomaly")
-    result, err = _safe_call(
-        lambda c: c.inquire(action=inquiry_type, label=label),
-    )
-    if err:
-        return _json_response(False, error=f"Inquire failed: {err}")
-    return _json_response(True, data={"result": result, "message": f"{inquiry_type.title()} recorded: {label[:80]}"})
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_action — Action layer (risk assessments)
-# ---------------------------------------------------------------------------
-
-def mindgraph_action(
-    action: str = "assess_risk",
+def mindgraph_commit(
+    action: str = "goal",
     label: str = "",
+    uid: str = "",
+    status: str = "",
     description: str = "",
-) -> str:
-    """Record risks and affordances in the Action layer.
-
-    Actions:
-      - assess_risk: Record a risk, threat, or potential failure mode.
-      - add_affordance: Record an affordance — an action that is available or enabled
-        by the current state of affairs (e.g. diplomatic leverage, technical capability).
-    """
-    if not label or not label.strip():
-        return _json_response(False, error="Label is required")
-
-    if action == "assess_risk":
-        kwargs = {"action": "assess", "label": label}
-        if description:
-            kwargs["description"] = description
-        result, err = _safe_call(lambda c: c.risk(**kwargs))
-        if err:
-            return _json_response(False, error=f"Risk assessment failed: {err}")
-        return _json_response(True, data={"result": result, "message": f"Risk assessed: {label[:80]}"})
-
-    elif action == "add_affordance":
-        kwargs = {"action": "add_affordance", "label": label}
-        if description:
-            kwargs["description"] = description
-        result, err = _safe_call(lambda c: c.procedure(**kwargs))
-        if err:
-            return _json_response(False, error=f"Add affordance failed: {err}")
-        return _json_response(True, data={"result": result, "message": f"Affordance: {label[:80]}"})
-
-    else:
-        return _json_response(False, error=f"Unknown action: {action}. Use: assess_risk, add_affordance")
-
-
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_decide — Intent layer (decisions with options)
-# ---------------------------------------------------------------------------
-
-def mindgraph_decide(
-    action: str = "open",
-    label: str = "",
-    decision_uid: str = "",
+    summary: str = "",
+    commit_type: str = "",
     option_label: str = "",
     chosen_option_uid: str = "",
-    summary: str = "",
+    plan_uid: str = "",
+    task_uid: str = "",
+    execution_uid: str = "",
 ) -> str:
-    """Manage decisions and constraints in the Intent layer.
+    """Unified agentic state — goals, decisions, plans, tasks, risks, questions.
 
-    Actions:
-      - open: Create a new open decision (requires label)
-      - add_option: Add an option to a decision (requires decision_uid + option_label)
-      - add_constraint: Add a constraint to a decision (requires decision_uid + label)
-      - resolve: Resolve by choosing an option (requires decision_uid + chosen_option_uid)
+    Intent actions:
+      - goal: Create/update a goal (label required, dedup enabled)
+      - project: Create/update a project (label required, dedup enabled)
+      - milestone: Create/update a milestone (label required, dedup enabled)
+      - open_decision: Open a decision point (label required)
+      - add_option: Add option to decision (uid + option_label required)
+      - add_constraint: Add constraint to decision (uid + label required)
+      - resolve_decision: Resolve decision (uid + chosen_option_uid required)
+
+    Action layer:
+      - assess_risk: Record a risk or threat (label required)
+      - add_affordance: Record a capability or opportunity (label required)
+
+    Agent layer:
+      - create_plan: Create a plan (label required)
+      - create_task: Create a task (label required)
+      - add_step: Add step to plan (plan_uid + label required)
+      - update_status: Update task/plan status (task_uid + status required)
+      - get_plan: Retrieve plan details (plan_uid required)
+      - start: Start execution (label or task_uid required)
+      - complete: Mark execution done (execution_uid required)
+      - fail: Mark execution failed (execution_uid required)
+      - create_policy: Create governance policy (label required)
+
+    Epistemic layer:
+      - question: Record open question (label required)
+      - hypothesis: Record testable hypothesis (label required)
+      - anomaly: Record anomaly (label required)
+
+    uid: For updates — goal/decision/task/execution UID
+    status: For status updates (active, completed, paused, abandoned)
     """
-    if action == "open":
+
+    # ── Intent: goal / project / milestone (with dedup) ──
+    if action in ("goal", "project", "milestone"):
+        ct = commit_type or action
+        if not label and not uid:
+            return _json_response(False, error="Label or uid is required")
+
+        # Explicit update by UID
+        if uid:
+            update_kwargs = {}
+            if status:
+                update_kwargs["status"] = status
+            if description:
+                update_kwargs["description"] = description
+            if label:
+                update_kwargs["label"] = label
+            result, err = _safe_call(
+                lambda c: c.update_node(uid, **update_kwargs),
+            )
+            if err:
+                return _json_response(False, error=f"Update failed: {err}")
+            return _json_response(True, data={
+                "result": result,
+                "uid": uid,
+                "message": f"Updated {ct}: {label or uid}",
+            })
+
+        # Client-side dedup
+        _node_type_map = {"goal": "Goal", "project": "Project", "milestone": "Milestone"}
+        node_type = _node_type_map.get(ct)
+        effective_status = status or "active"
+
+        if node_type and label:
+            try:
+                client = _get_client()
+                if client:
+                    raw = _fts_search(client, label, node_type=node_type, limit=5)
+                    existing = raw.get("results", []) if isinstance(raw, dict) else raw
+                    if isinstance(existing, list):
+                        match = None
+                        match_kind = ""
+                        label_lower = label.strip().lower()
+                        for node in existing:
+                            existing_label = (node.get("label") or "").strip().lower()
+                            if existing_label == label_lower:
+                                match = node
+                                match_kind = "exact"
+                                break
+                        if match is None and DEDUP_FUZZY_THRESHOLD < 1.0:
+                            best_score = 0.0
+                            for node in existing:
+                                existing_label = node.get("label") or ""
+                                if not existing_label:
+                                    continue
+                                score = _label_similarity(label, existing_label)
+                                if score >= DEDUP_FUZZY_THRESHOLD and score > best_score:
+                                    best_score = score
+                                    match = node
+                                    match_kind = f"fuzzy ({best_score:.0%})"
+                        if match is not None:
+                            node_uid = match.get("uid", "")
+                            existing_status = _get_prop(match, "status", "")
+                            needs_update = (
+                                (effective_status and existing_status != effective_status)
+                                or description
+                            )
+                            if needs_update and node_uid:
+                                update_kw = {}
+                                if effective_status and existing_status != effective_status:
+                                    update_kw["status"] = effective_status
+                                if description:
+                                    update_kw["description"] = description
+                                try:
+                                    client.update_node(node_uid, **update_kw)
+                                    match.update(update_kw)
+                                except Exception as ue:
+                                    logger.debug("Dedup update failed (non-fatal): %s", ue)
+                            return _json_response(True, data={
+                                "result": match,
+                                "uid": node_uid,
+                                "message": f"Found existing {ct}: {match.get('label', label)} ({match_kind} dedup)",
+                                "deduplicated": True,
+                            })
+            except Exception:
+                pass
+
+        # Create new commitment
+        kwargs = {"action": ct, "label": label, "status": effective_status}
+        if description:
+            kwargs["description"] = description
+        result, err = _safe_call(lambda c: c.commit(**kwargs))
+        if err:
+            return _json_response(False, error=f"Commit failed: {err}")
+        return _json_response(True, data={"result": result, "message": f"Committed {ct}: {label}"})
+
+    # ── Intent: decisions ──
+    elif action == "open_decision":
         if not label or not label.strip():
             return _json_response(False, error="Label required to open a decision")
         result, err = _safe_call(
@@ -1477,8 +1124,9 @@ def mindgraph_decide(
         return _json_response(True, data={"result": result, "message": f"Decision opened: {label[:80]}"})
 
     elif action == "add_option":
+        decision_uid = uid
         if not decision_uid or not option_label:
-            return _json_response(False, error="decision_uid and option_label required")
+            return _json_response(False, error="uid (decision) and option_label required")
         result, err = _safe_call(
             lambda c: c.add_option(decision_uid, option_label, summary=summary or None),
         )
@@ -1487,8 +1135,9 @@ def mindgraph_decide(
         return _json_response(True, data={"result": result, "message": f"Option added: {option_label[:80]}"})
 
     elif action == "add_constraint":
+        decision_uid = uid
         if not decision_uid or not label:
-            return _json_response(False, error="decision_uid and label required for constraint")
+            return _json_response(False, error="uid (decision) and label required for constraint")
         result, err = _safe_call(
             lambda c: c.deliberate(action="add_constraint", decision_uid=decision_uid, label=label),
         )
@@ -1496,9 +1145,10 @@ def mindgraph_decide(
             return _json_response(False, error=f"Add constraint failed: {err}")
         return _json_response(True, data={"result": result, "message": f"Constraint added: {label[:80]}"})
 
-    elif action == "resolve":
+    elif action == "resolve_decision":
+        decision_uid = uid
         if not decision_uid or not chosen_option_uid:
-            return _json_response(False, error="decision_uid and chosen_option_uid required")
+            return _json_response(False, error="uid (decision) and chosen_option_uid required")
         result, err = _safe_call(
             lambda c: c.resolve_decision(decision_uid, chosen_option_uid, summary=summary or None),
         )
@@ -1506,49 +1156,38 @@ def mindgraph_decide(
             return _json_response(False, error=f"Resolve decision failed: {err}")
         return _json_response(True, data={"result": result, "message": "Decision resolved"})
 
-    else:
-        return _json_response(False, error=f"Unknown action: {action}. Use: open, add_option, add_constraint, resolve")
+    # ── Action layer: risks and affordances ──
+    elif action == "assess_risk":
+        if not label or not label.strip():
+            return _json_response(False, error="Label is required")
+        kwargs = {"action": "assess", "label": label}
+        if description:
+            kwargs["description"] = description
+        result, err = _safe_call(lambda c: c.risk(**kwargs))
+        if err:
+            return _json_response(False, error=f"Risk assessment failed: {err}")
+        return _json_response(True, data={"result": result, "message": f"Risk assessed: {label[:80]}"})
 
+    elif action == "add_affordance":
+        if not label or not label.strip():
+            return _json_response(False, error="Label is required")
+        kwargs = {"action": "add_affordance", "label": label}
+        if description:
+            kwargs["description"] = description
+        result, err = _safe_call(lambda c: c.procedure(**kwargs))
+        if err:
+            return _json_response(False, error=f"Add affordance failed: {err}")
+        return _json_response(True, data={"result": result, "message": f"Affordance: {label[:80]}"})
 
-# ---------------------------------------------------------------------------
-# Tool: mindgraph_plan — Agent layer (plans, tasks, execution, governance)
-# ---------------------------------------------------------------------------
-
-def mindgraph_plan(
-    action: str = "create_task",
-    label: str = "",
-    plan_uid: str = "",
-    task_uid: str = "",
-    execution_uid: str = "",
-    status: str = "",
-    description: str = "",
-) -> str:
-    """Manage plans, tasks, execution, and governance in the Agent layer.
-
-    Plan actions:
-      - create_plan: Create a plan (requires label)
-      - create_task: Create a task (requires label)
-      - add_step: Add a step to a plan (requires plan_uid + label)
-      - update_status: Update a task/plan status (requires task_uid + status)
-      - get_plan: Retrieve a plan's details (requires plan_uid)
-
-    Execution actions:
-      - start: Start executing a task (requires label or task_uid)
-      - complete: Mark execution complete (requires execution_uid)
-      - fail: Mark execution failed (requires execution_uid)
-
-    Governance actions:
-      - create_policy: Create a governance policy (requires label)
-    """
-    if action in ("create_plan", "create_task") and not label:
-        return _json_response(False, error=f"Label required for {action}")
-
-    if action in ("create_plan", "create_task", "add_step", "update_status", "get_plan"):
+    # ── Agent layer: plans, tasks, execution, governance ──
+    elif action in ("create_plan", "create_task", "add_step", "update_status", "get_plan"):
+        if action in ("create_plan", "create_task") and not label:
+            return _json_response(False, error=f"Label required for {action}")
         kwargs = {"action": action, "label": label}
         if plan_uid:
             kwargs["plan_uid"] = plan_uid
-        if task_uid:
-            kwargs["task_uid"] = task_uid
+        if task_uid or uid:
+            kwargs["task_uid"] = task_uid or uid
         if status:
             kwargs["status"] = status
         if description:
@@ -1562,8 +1201,8 @@ def mindgraph_plan(
         kwargs = {"action": action}
         if label:
             kwargs["label"] = label
-        if execution_uid:
-            kwargs["execution_uid"] = execution_uid
+        if execution_uid or uid:
+            kwargs["execution_uid"] = execution_uid or uid
         if task_uid:
             kwargs["task_uid"] = task_uid
         result, err = _safe_call(lambda c: c.execution(**kwargs))
@@ -1582,8 +1221,228 @@ def mindgraph_plan(
             return _json_response(False, error=f"Create policy failed: {err}")
         return _json_response(True, data={"result": result, "message": f"Policy: {label[:80]}"})
 
+    # ── Epistemic layer: questions, hypotheses, anomalies ──
+    elif action in ("question", "hypothesis", "anomaly"):
+        if not label or not label.strip():
+            return _json_response(False, error="Label is required")
+        result, err = _safe_call(
+            lambda c: c.inquire(action=action, label=label),
+        )
+        if err:
+            return _json_response(False, error=f"Inquire failed: {err}")
+        return _json_response(True, data={"result": result, "message": f"{action.title()} recorded: {label[:80]}"})
+
     else:
-        return _json_response(False, error=f"Unknown action: {action}. Use: create_plan, create_task, add_step, update_status, get_plan, start, complete, fail, create_policy")
+        return _json_response(False, error=(
+            f"Unknown action: {action}. Use: goal, project, milestone, "
+            "open_decision, add_option, add_constraint, resolve_decision, "
+            "assess_risk, add_affordance, create_plan, create_task, add_step, "
+            "update_status, get_plan, start, complete, fail, create_policy, "
+            "question, hypothesis, anomaly"
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Tool: mindgraph_retrieve
+# ---------------------------------------------------------------------------
+
+def mindgraph_retrieve(
+    query: str = "",
+    mode: str = "context",
+    limit: int = 10,
+    include_chunks: bool = True,
+    include_graph: bool = True,
+    node_type: str = "",
+) -> str:
+    """Search and query the semantic graph.
+
+    Modes:
+      - context: hybrid retrieval (FTS + semantic) — handles natural language well (default).
+        Returns nodes, edges, and provenance chunks via POST /retrieve/context.
+      - search: keyword-only full-text search (FTS) — faster for exact name lookups.
+      - recent: recently updated nodes, filterable by node_type.
+      - goals: active goals sorted by salience
+      - questions: open questions and hypotheses
+      - decisions: open decisions needing resolution
+      - neighborhood: get nodes connected to a specific node (query=node_uid)
+      - weak_claims: claims with low confidence
+      - contradictions: contradictory claims in the graph
+    """
+    _VALID_MODES = (
+        "context", "search", "recent", "goals", "questions", "decisions",
+        "neighborhood", "weak_claims", "contradictions",
+    )
+    # Validate
+    if mode in ("context", "search") and not query:
+        return _json_response(False, error=f"Query required for {mode} mode")
+    if mode == "neighborhood" and not query:
+        return _json_response(False, error="Node UID required for neighborhood mode")
+    if mode not in _VALID_MODES:
+        return _json_response(False, error=f"Unknown mode: {mode}. Use: {', '.join(_VALID_MODES)}")
+
+    def _do_retrieve(client):
+        if mode == "context":
+            return client.retrieve_context(
+                query,
+                k=limit,
+                node_types=[node_type] if node_type else None,
+                include_chunks=include_chunks,
+                include_graph=include_graph,
+            )
+        elif mode == "search":
+            return _fts_search(
+                client, query, limit=limit, node_type=node_type or None,
+                include_edges=include_graph, include_chunks=include_chunks,
+            )
+        elif mode == "recent":
+            kwargs = {"action": "recent", "limit": limit}
+            if node_type:
+                kwargs["node_types"] = [node_type]
+            return client.retrieve(**kwargs)
+        elif mode == "goals":
+            return client.get_goals()
+        elif mode == "questions":
+            return client.get_open_questions()
+        elif mode == "decisions":
+            return client.get_open_decisions()
+        elif mode == "neighborhood":
+            return client.neighborhood(query, max_depth=1)
+        elif mode == "weak_claims":
+            return client.get_weak_claims()
+        elif mode == "contradictions":
+            return client.get_contradictions()
+
+    # Hard caps for structured modes (these endpoints return everything)
+    _STRUCTURED_CAPS = {
+        "goals": 10,
+        "questions": 10,
+        "decisions": 10,
+        "weak_claims": 10,
+        "contradictions": 10,
+        "neighborhood": 20,
+    }
+    effective_limit = min(limit, _STRUCTURED_CAPS.get(mode, limit))
+
+    result, err = _safe_call(_do_retrieve)
+    if err:
+        return _json_response(False, error=f"Retrieve failed: {err}")
+
+    # ── Normalize results based on mode ──
+    # Context mode: {"chunks": [...], "graph": {"nodes": [...], "edges": [...]}}
+    # Search mode:  {"results": [...], "edges": [...], "chunks": [...]} or flat list
+    # Recent mode:  flat list of node dicts
+    # Structured:   flat list of node dicts
+    edges = []
+    chunks = []
+    if mode == "context" and isinstance(result, dict):
+        graph = result.get("graph", {})
+        nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
+        edges = graph.get("edges", []) if isinstance(graph, dict) else []
+        chunks = result.get("chunks", [])
+    elif isinstance(result, dict):
+        nodes = result.get("results", result.get("nodes", []))
+        edges = result.get("edges", [])
+        chunks = result.get("chunks", [])
+    elif isinstance(result, list):
+        nodes = result
+    else:
+        nodes = [result] if result else []
+
+    # Format nodes — lean output for structured modes, full for search/context
+    formatted = []
+    for item in nodes[:effective_limit]:
+        if not isinstance(item, dict):
+            formatted.append(str(item))
+            continue
+
+        # Unwrap {node: {...}, score: N} envelope
+        n = item.get("node", item) if "node" in item else item
+
+        if mode in ("goals", "questions", "decisions"):
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+            }
+            status = _get_prop(n, "status", "")
+            if status:
+                entry["status"] = status
+            formatted.append(entry)
+
+        elif mode in ("weak_claims", "contradictions"):
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+            }
+            conf = n.get("confidence", _get_prop(n, "confidence", ""))
+            if conf:
+                entry["confidence"] = conf
+            formatted.append(entry)
+
+        else:
+            # Full format for context / search / recent / neighborhood
+            score = item.get("score", "")
+            entry = {
+                "uid": n.get("uid", ""),
+                "label": n.get("label", ""),
+                "type": n.get("node_type", n.get("type", "")),
+            }
+            status = _get_prop(n, "status", "")
+            if status:
+                entry["status"] = status
+            if score:
+                entry["score"] = score
+            summary = n.get("summary", "")
+            if summary and (not entry["label"] or entry["label"].startswith("chunk-")):
+                entry["summary"] = summary[:200]
+            formatted.append(entry)
+
+    data = {
+        "results": formatted,
+        "count": len(formatted),
+        "mode": mode,
+    }
+    if query:
+        data["query"] = query
+
+    # ── Include edges (resolve UIDs to labels for context mode) ──
+    if edges:
+        if mode == "context":
+            uid_label = {n.get("uid", ""): n.get("label", "") for n in nodes[:effective_limit]}
+            data["edges"] = [
+                {
+                    "type": e.get("edge_type", e.get("type", "")),
+                    "source": uid_label.get(e.get("from_uid", ""), e.get("from_uid", "")),
+                    "target": uid_label.get(e.get("to_uid", ""), e.get("to_uid", "")),
+                }
+                for e in edges[:effective_limit]
+            ]
+        else:
+            data["edges"] = [
+                {
+                    "type": e.get("edge_type", e.get("type", "")),
+                    "source": e.get("source_label", e.get("from_label", e.get("source_uid", ""))),
+                    "target": e.get("target_label", e.get("to_label", e.get("target_uid", ""))),
+                }
+                for e in edges[:effective_limit]
+            ]
+        data["edge_count"] = len(edges)
+
+    if chunks:
+        data["chunks"] = [
+            {
+                "content": c.get("content", c.get("text", ""))[:500],
+                "document_title": c.get("document_title", c.get("source", "")),
+                "score": c.get("score", ""),
+            }
+            for c in chunks[:effective_limit]
+        ]
+        data["chunk_count"] = len(chunks)
+
+    return _json_response(True, data=data)
+
+
+
+# (Old standalone tools removed — absorbed into mindgraph_remember and mindgraph_commit)
 
 
 # ---------------------------------------------------------------------------
@@ -1596,14 +1455,12 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
     Called at the start of each turn to give the agent topic-relevant knowledge
     from the semantic graph without requiring an explicit tool call.
 
-    Uses FTS (full-text search via POST /search) with include_edges=true and
-    include_chunks=true for low-latency per-turn retrieval that returns graph
-    nodes, their connecting edges, and provenance chunks in a single round-trip.
+    Uses hybrid retrieval (FTS + semantic via POST /retrieve/context) so that
+    natural-language user messages are handled well. The server fuses FTS and
+    embedding results via RRF, falling back to FTS-only when no embedding
+    provider is configured.
 
-    Response shape (server v0.5+):
-        {"results": [nodes...], "edges": [edges...], "chunks": [chunks...]}
-
-    Falls back gracefully to flat node list on older servers.
+    Response shape: {"chunks": [...], "graph": {"nodes": [...], "edges": [...]}}
 
     Metrics are tracked in `proactive_metrics` (call .snapshot() for a summary).
 
@@ -1634,9 +1491,11 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
 
     t0 = _time.monotonic()
     try:
-        raw = _fts_search(
-            client, stripped[:500], limit=k,
-            include_edges=True, include_chunks=True,
+        raw = client.retrieve_context(
+            stripped[:500],
+            k=k,
+            include_chunks=True,
+            include_graph=True,
         )
     except Exception as e:
         latency_ms = (_time.monotonic() - t0) * 1000
@@ -1646,12 +1505,15 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
 
     latency_ms = (_time.monotonic() - t0) * 1000
 
-    # Normalize response — handle both enriched dict and flat list (old server)
+    # Normalize response from retrieve_context
+    # Shape: {"chunks": [...], "graph": {"nodes": [...], "edges": [...]}}
     if isinstance(raw, dict):
-        nodes = raw.get("results", [])
-        edges = raw.get("edges", [])
+        graph = raw.get("graph", {})
+        nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
+        edges = graph.get("edges", []) if isinstance(graph, dict) else []
         chunks = raw.get("chunks", [])
     elif isinstance(raw, list):
+        # Fallback for unexpected format
         nodes = raw
         edges = []
         chunks = []
@@ -1662,6 +1524,11 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
     if not nodes and not chunks:
         proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
         return None
+
+    # Track top chunk score for metrics
+    top_score = 0
+    if chunks:
+        top_score = max((c.get("score", 0) or 0 for c in chunks), default=0)
 
     sections = []
 
@@ -1726,23 +1593,24 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
             + "\n".join(decision_lines[:3])
         )
 
-    # ── Format edges (relationships between nodes) ──
+    # ── Format edges (resolve UIDs to labels) ──
     if edges:
+        uid_label = {n.get("uid", ""): n.get("label", "") for n in nodes}
         edge_lines = []
         for e in edges[:5]:
             etype = e.get("edge_type", e.get("type", ""))
-            src = e.get("source_label", e.get("from_label", ""))
-            tgt = e.get("target_label", e.get("to_label", ""))
+            src = uid_label.get(e.get("from_uid", ""), e.get("source_label", e.get("from_label", "")))
+            tgt = uid_label.get(e.get("to_uid", ""), e.get("target_label", e.get("to_label", "")))
             if src and tgt and etype:
                 edge_lines.append(f"  - {src} —[{etype}]→ {tgt}")
         if edge_lines:
             sections.append("Relationships:\n" + "\n".join(edge_lines))
 
     if not sections:
-        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=0)
+        proactive_metrics.record(hit=False, latency_ms=latency_ms, top_score=top_score)
         return None
 
-    proactive_metrics.record(hit=True, latency_ms=latency_ms, top_score=0)
+    proactive_metrics.record(hit=True, latency_ms=latency_ms, top_score=top_score)
     logger.info("MindGraph proactive: HIT (%.0fms, %d nodes, %d edges, %d chunks)",
                 latency_ms, len(nodes), len(edges), len(chunks))
 
@@ -1811,150 +1679,84 @@ def mindgraph_ingest(
 # Tool schemas (OpenAI format)
 # ---------------------------------------------------------------------------
 
-MINDGRAPH_SESSION_SCHEMA = {
-    "name": "mindgraph_session",
+MINDGRAPH_REMEMBER_SCHEMA = {
+    "name": "mindgraph_remember",
     "description": (
-        "Open or close a MindGraph semantic memory session. Sessions track "
-        "what happens during a conversation and enable distillation at the end. "
-        "Open at conversation start, close with a summary at the end."
+        "Store knowledge in the semantic graph. Use for entities, observations, claims, "
+        "preferences, and notes.\n"
+        "- entity: People, orgs, concepts, places, events (deduplication built-in).\n"
+        "- observation: Facts about entities — pass entity_uid to link.\n"
+        "- claim: Epistemic claims with evidence and confidence (0.0-1.0).\n"
+        "- preference: User preferences and corrections.\n"
+        "- note: General notes, reflections, insights."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["open", "close"],
-                "description": "Whether to open or close the session.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "(Close only) Summary of what happened in the session for distillation.",
-            },
             "label": {
                 "type": "string",
-                "description": "(Open only) Session label for identification.",
+                "description": "Name, description, or content to store.",
             },
-        },
-        "required": ["action"],
-    },
-}
-
-MINDGRAPH_JOURNAL_SCHEMA = {
-    "name": "mindgraph_journal",
-    "description": (
-        "Capture observations, notes, preferences, and reflections into semantic memory. "
-        "Use this for low-friction knowledge capture — things worth remembering but not "
-        "formal enough for argue() or commit(). Examples: user preferences, environmental "
-        "observations, interesting patterns, session insights."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "entry": {
+            "action": {
                 "type": "string",
-                "description": "The content to capture.",
+                "enum": ["entity", "observation", "claim", "preference", "note"],
+                "description": "What to store. Default: note.",
             },
-            "entry_type": {
+            "entity_type": {
                 "type": "string",
-                "enum": ["observation", "preference", "note", "reflection", "insight"],
-                "description": "Type of journal entry. Default: observation.",
+                "enum": ["concept", "person", "organization", "nation", "place", "event", "work", "other"],
+                "description": "(entity only) Type of entity. Default: concept.",
             },
-        },
-        "required": ["entry"],
-    },
-}
-
-MINDGRAPH_ARGUE_SCHEMA = {
-    "name": "mindgraph_argue",
-    "description": (
-        "Record a structured epistemic claim with optional evidence and warrant. "
-        "Use for beliefs, conclusions, and reasoned positions that should be tracked "
-        "and potentially challenged later. Claims have confidence scores that can "
-        "strengthen or weaken over time as evidence accumulates."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "claim": {
+            "properties": {
+                "type": "object",
+                "description": "(entity only) Additional properties (e.g. occupation, domain).",
+            },
+            "entity_uid": {
                 "type": "string",
-                "description": "The claim or belief to record.",
+                "description": "(observation only) UID of entity to link via HAS_OBSERVATION edge.",
             },
             "evidence": {
                 "type": "string",
-                "description": "Supporting evidence for the claim.",
+                "description": "(claim only) Supporting evidence.",
             },
             "warrant": {
                 "type": "string",
-                "description": "The reasoning connecting evidence to claim.",
+                "description": "(claim only) Reasoning connecting evidence to claim.",
             },
             "confidence": {
                 "type": "number",
-                "description": "Confidence level 0.0-1.0. Default: 0.7.",
+                "description": "(claim only) Confidence 0.0-1.0. Default: 0.7.",
                 "minimum": 0.0,
                 "maximum": 1.0,
             },
         },
-        "required": ["claim"],
-    },
-}
-
-MINDGRAPH_COMMIT_SCHEMA = {
-    "name": "mindgraph_commit",
-    "description": (
-        "Record or update goals, projects, and milestones. Provide label to create "
-        "or deduplicate; provide uid to update an existing commitment. At least one "
-        "of label or uid is required."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "label": {
-                "type": "string",
-                "description": "Name of the goal, project, or milestone. Required for new commitments.",
-            },
-            "commit_type": {
-                "type": "string",
-                "enum": ["goal", "project", "milestone"],
-                "description": "Type of commitment. Default: goal.",
-            },
-            "status": {
-                "type": "string",
-                "enum": ["active", "completed", "paused", "abandoned"],
-                "description": "Current status. Default: active.",
-            },
-            "description": {
-                "type": "string",
-                "description": "Detailed description or context.",
-            },
-            "uid": {
-                "type": "string",
-                "description": "UID of existing commitment to update. When provided, label is optional. Get UIDs from mindgraph_retrieve(mode='goals').",
-            },
-        },
-        "required": [],
+        "required": ["label"],
     },
 }
 
 MINDGRAPH_RETRIEVE_SCHEMA = {
     "name": "mindgraph_retrieve",
     "description": (
-        "Search the semantic graph memory. Uses keyword-based full-text search (FTS), "
-        "not semantic search — use names and key terms as queries, not natural-language "
-        "questions. Basic context is auto-injected each turn; use this for deeper queries.\n"
-        "Modes: search (FTS, default), goals, questions, decisions, neighborhood (by UID), "
-        "weak_claims, contradictions."
+        "Query the semantic graph memory. Two search modes:\n"
+        "- context (default): Hybrid retrieval (FTS + semantic). Handles natural language well.\n"
+        "- search: Keyword-only FTS. Faster for exact name lookups.\n"
+        "Other modes: recent, goals, questions, decisions, neighborhood (by UID), "
+        "weak_claims, contradictions.\n"
+        "Basic context is auto-injected each turn; use this for deeper queries."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Keywords to search for (e.g. 'Alice Smith AI'), or node UID for neighborhood mode. Use key terms, not questions.",
+                "description": "Search query. Natural language works for 'context' mode; "
+                "use keywords for 'search' mode.",
             },
             "mode": {
                 "type": "string",
-                "enum": ["search", "goals", "questions", "decisions", "neighborhood", "weak_claims", "contradictions"],
-                "description": "Retrieval mode. Default: search (FTS).",
+                "enum": ["context", "search", "recent", "goals", "questions", "decisions",
+                         "neighborhood", "weak_claims", "contradictions"],
+                "description": "Retrieval mode. Default: context (hybrid FTS + semantic).",
             },
             "limit": {
                 "type": "integer",
@@ -1964,18 +1766,89 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
             },
             "node_type": {
                 "type": "string",
-                "description": "(search mode only) Filter results by node type (e.g. 'Person', 'Goal', 'Project', 'Task', 'Claim').",
+                "description": "Filter by node type (e.g. 'Person', 'Goal', 'Project', 'Task', 'Claim').",
             },
             "include_chunks": {
                 "type": "boolean",
-                "description": "(search mode) Include provenance source text chunks. Default: true.",
+                "description": "(context/search) Include provenance source text chunks. Default: true.",
             },
             "include_graph": {
                 "type": "boolean",
-                "description": "(search mode) Include connecting edges between result nodes. Default: true.",
+                "description": "(context/search) Include connecting edges. Default: true.",
             },
         },
         "required": [],
+    },
+}
+
+MINDGRAPH_COMMIT_SCHEMA = {
+    "name": "mindgraph_commit",
+    "description": (
+        "Track goals, decisions, plans, tasks, risks, and questions.\n"
+        "Intent: goal, project, milestone (dedup + update via uid), "
+        "open_decision, add_option, add_constraint, resolve_decision.\n"
+        "Action: assess_risk, add_affordance.\n"
+        "Agent: create_plan, create_task, add_step, update_status, get_plan, "
+        "start, complete, fail, create_policy.\n"
+        "Epistemic: question, hypothesis, anomaly."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "goal", "project", "milestone",
+                    "open_decision", "add_option", "add_constraint", "resolve_decision",
+                    "assess_risk", "add_affordance",
+                    "create_plan", "create_task", "add_step", "update_status", "get_plan",
+                    "start", "complete", "fail", "create_policy",
+                    "question", "hypothesis", "anomaly",
+                ],
+                "description": "Action to perform.",
+            },
+            "label": {
+                "type": "string",
+                "description": "Name or description.",
+            },
+            "uid": {
+                "type": "string",
+                "description": "UID for updates (goal, decision, task, or execution UID).",
+            },
+            "status": {
+                "type": "string",
+                "description": "Status for updates (active, completed, paused, abandoned).",
+            },
+            "description": {
+                "type": "string",
+                "description": "Detailed description or context.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "Summary or rationale (for decisions).",
+            },
+            "option_label": {
+                "type": "string",
+                "description": "(add_option) Label for the option.",
+            },
+            "chosen_option_uid": {
+                "type": "string",
+                "description": "(resolve_decision) UID of the chosen option.",
+            },
+            "plan_uid": {
+                "type": "string",
+                "description": "(add_step, get_plan) UID of the plan.",
+            },
+            "task_uid": {
+                "type": "string",
+                "description": "(update_status, start) UID of the task.",
+            },
+            "execution_uid": {
+                "type": "string",
+                "description": "(complete, fail) UID of the execution.",
+            },
+        },
+        "required": ["action"],
     },
 }
 
@@ -2008,247 +1881,29 @@ MINDGRAPH_INGEST_SCHEMA = {
     },
 }
 
-MINDGRAPH_CAPTURE_SCHEMA = {
-    "name": "mindgraph_capture",
-    "description": (
-        "Capture facts into the knowledge graph.\n"
-        "- entity: Concrete things (people, orgs, concepts, places, events, works) in the Reality layer. "
-        "Uses deduplication — safe to call repeatedly for the same entity.\n"
-        "- observation: Factual observations about the world in the Reality layer. "
-        "Pass entity_uid to link the observation to an entity (recommended).\n"
-        "- concept: Abstract concepts in the Epistemic layer (theories, frameworks, patterns)."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "label": {
-                "type": "string",
-                "description": "Name or description.",
-            },
-            "capture_type": {
-                "type": "string",
-                "enum": ["entity", "observation", "concept"],
-                "description": "What to capture. Default: entity.",
-            },
-            "entity_type": {
-                "type": "string",
-                "enum": ["concept", "person", "organization", "nation", "place", "event", "work", "other"],
-                "description": "(entity only) Type of entity. Default: concept.",
-            },
-            "properties": {
-                "type": "object",
-                "description": "Additional properties (e.g. domain, author, description).",
-            },
-            "entity_uid": {
-                "type": "string",
-                "description": "(observation only) UID of entity to link this observation to. Creates a HAS_OBSERVATION edge. Get entity UIDs from prior capture() or retrieve() calls.",
-            },
-        },
-        "required": ["label"],
-    },
-}
-
-MINDGRAPH_INQUIRE_SCHEMA = {
-    "name": "mindgraph_inquire",
-    "description": (
-        "Record questions, hypotheses, or anomalies in the Epistemic layer.\n"
-        "- question: An open question worth tracking (shows up at session start).\n"
-        "- hypothesis: A testable conjecture or proposed explanation.\n"
-        "- anomaly: Something that doesn't fit existing models — worth investigating."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "label": {
-                "type": "string",
-                "description": "The question, hypothesis, or anomaly to record.",
-            },
-            "inquiry_type": {
-                "type": "string",
-                "enum": ["question", "hypothesis", "anomaly"],
-                "description": "Type of inquiry. Default: question.",
-            },
-        },
-        "required": ["label"],
-    },
-}
-
-MINDGRAPH_ACTION_SCHEMA = {
-    "name": "mindgraph_action",
-    "description": (
-        "Record risks and affordances in the Action layer.\n"
-        "- assess_risk: A risk, threat, or potential failure mode to track.\n"
-        "- add_affordance: An action enabled by current state — a capability, leverage point, "
-        "or opportunity that exists and could be exercised."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["assess_risk", "add_affordance"],
-                "description": "Action type. Default: assess_risk.",
-            },
-            "label": {
-                "type": "string",
-                "description": "Short name for the risk or affordance.",
-            },
-            "description": {
-                "type": "string",
-                "description": "Detailed description.",
-            },
-        },
-        "required": ["label"],
-    },
-}
-
-MINDGRAPH_DECIDE_SCHEMA = {
-    "name": "mindgraph_decide",
-    "description": (
-        "Manage decisions in the Intent layer. Open a decision when a choice point is identified, "
-        "add options as they are discussed, and resolve when a decision is made. Decisions track "
-        "the deliberation process and show up at session start as 'Open Decisions'."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["open", "add_option", "add_constraint", "resolve"],
-                "description": "Action: open, add_option, add_constraint, or resolve.",
-            },
-            "label": {
-                "type": "string",
-                "description": "(open) Name of the decision.",
-            },
-            "decision_uid": {
-                "type": "string",
-                "description": "(add_option, resolve) UID of the decision.",
-            },
-            "option_label": {
-                "type": "string",
-                "description": "(add_option) Label for the option.",
-            },
-            "chosen_option_uid": {
-                "type": "string",
-                "description": "(resolve) UID of the chosen option.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "Optional summary or rationale.",
-            },
-        },
-        "required": ["action"],
-    },
-}
-
-MINDGRAPH_PLAN_SCHEMA = {
-    "name": "mindgraph_plan",
-    "description": (
-        "Manage plans, tasks, execution tracking, and governance in the Agent layer.\n\n"
-        "Planning: create_plan, create_task, add_step, update_status, get_plan.\n"
-        "Execution: start (begin work), complete (done), fail (failed).\n"
-        "Governance: create_policy (rules/constraints the agent should follow).\n\n"
-        "Use this to track your own work — create tasks for multi-step operations, "
-        "mark them complete/failed, and maintain provenance of what was done."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["create_plan", "create_task", "add_step", "update_status",
-                         "get_plan", "start", "complete", "fail", "create_policy"],
-                "description": "Action to perform.",
-            },
-            "label": {
-                "type": "string",
-                "description": "Name/description for the plan, task, step, or policy.",
-            },
-            "plan_uid": {
-                "type": "string",
-                "description": "(add_step, get_plan) UID of the plan.",
-            },
-            "task_uid": {
-                "type": "string",
-                "description": "(update_status, start) UID of the task.",
-            },
-            "execution_uid": {
-                "type": "string",
-                "description": "(complete, fail) UID of the execution to finalize.",
-            },
-            "status": {
-                "type": "string",
-                "description": "(update_status) New status value.",
-            },
-            "description": {
-                "type": "string",
-                "description": "Detailed description or context.",
-            },
-        },
-        "required": ["action"],
-    },
-}
-
 
 # ---------------------------------------------------------------------------
-# TOOLS list for plugin registration
+# TOOLS list for plugin registration (4 tools)
 # ---------------------------------------------------------------------------
 
 TOOLS = [
     {
-        "name": "mindgraph_session",
+        "name": "mindgraph_remember",
         "toolset": "mindgraph",
-        "schema": MINDGRAPH_SESSION_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_session(
-            action=args.get("action", "open"),
-            summary=args.get("summary", ""),
+        "schema": MINDGRAPH_REMEMBER_SCHEMA,
+        "handler": lambda args, **kw: mindgraph_remember(
             label=args.get("label", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🧠",
-    },
-    {
-        "name": "mindgraph_journal",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_JOURNAL_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_journal(
-            entry=args.get("entry", ""),
-            entry_type=args.get("entry_type", "observation"),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "📓",
-    },
-    {
-        "name": "mindgraph_argue",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_ARGUE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_argue(
-            claim=args.get("claim", ""),
+            action=args.get("action", "note"),
+            entity_type=args.get("entity_type", "concept"),
+            properties=args.get("properties"),
+            entity_uid=args.get("entity_uid", ""),
             evidence=args.get("evidence", ""),
             warrant=args.get("warrant", ""),
             confidence=args.get("confidence", 0.7),
         ),
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "⚖️",
-    },
-    {
-        "name": "mindgraph_commit",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_COMMIT_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_commit(
-            label=args.get("label", ""),
-            commit_type=args.get("commit_type", "goal"),
-            status=args.get("status", "active"),
-            description=args.get("description", ""),
-            uid=args.get("uid", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🎯",
+        "emoji": "🧠",
     },
     {
         "name": "mindgraph_retrieve",
@@ -2256,7 +1911,7 @@ TOOLS = [
         "schema": MINDGRAPH_RETRIEVE_SCHEMA,
         "handler": lambda args, **kw: mindgraph_retrieve(
             query=args.get("query", ""),
-            mode=args.get("mode", "search"),
+            mode=args.get("mode", "context"),
             limit=args.get("limit", 10),
             include_chunks=args.get("include_chunks", True),
             include_graph=args.get("include_graph", True),
@@ -2265,6 +1920,27 @@ TOOLS = [
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
         "emoji": "🔮",
+    },
+    {
+        "name": "mindgraph_commit",
+        "toolset": "mindgraph",
+        "schema": MINDGRAPH_COMMIT_SCHEMA,
+        "handler": lambda args, **kw: mindgraph_commit(
+            action=args.get("action", "goal"),
+            label=args.get("label", ""),
+            uid=args.get("uid", ""),
+            status=args.get("status", ""),
+            description=args.get("description", ""),
+            summary=args.get("summary", ""),
+            option_label=args.get("option_label", ""),
+            chosen_option_uid=args.get("chosen_option_uid", ""),
+            plan_uid=args.get("plan_uid", ""),
+            task_uid=args.get("task_uid", ""),
+            execution_uid=args.get("execution_uid", ""),
+        ),
+        "check_fn": check_requirements,
+        "requires_env": ["MINDGRAPH_API_KEY"],
+        "emoji": "🎯",
     },
     {
         "name": "mindgraph_ingest",
@@ -2278,78 +1954,5 @@ TOOLS = [
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
         "emoji": "📥",
-    },
-    {
-        "name": "mindgraph_capture",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_CAPTURE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_capture(
-            label=args.get("label", ""),
-            capture_type=args.get("capture_type", "entity"),
-            entity_type=args.get("entity_type", "concept"),
-            properties=args.get("properties"),
-            entity_uid=args.get("entity_uid", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🏷️",
-    },
-    {
-        "name": "mindgraph_inquire",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_INQUIRE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_inquire(
-            label=args.get("label", ""),
-            inquiry_type=args.get("inquiry_type", "question"),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "❓",
-    },
-    {
-        "name": "mindgraph_action",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_ACTION_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_action(
-            action=args.get("action", "assess_risk"),
-            label=args.get("label", ""),
-            description=args.get("description", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "⚠️",
-    },
-    {
-        "name": "mindgraph_decide",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_DECIDE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_decide(
-            action=args.get("action", "open"),
-            label=args.get("label", ""),
-            decision_uid=args.get("decision_uid", ""),
-            option_label=args.get("option_label", ""),
-            chosen_option_uid=args.get("chosen_option_uid", ""),
-            summary=args.get("summary", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "⚖️",
-    },
-    {
-        "name": "mindgraph_plan",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_PLAN_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_plan(
-            action=args.get("action", "create_task"),
-            label=args.get("label", ""),
-            plan_uid=args.get("plan_uid", ""),
-            task_uid=args.get("task_uid", ""),
-            execution_uid=args.get("execution_uid", ""),
-            status=args.get("status", ""),
-            description=args.get("description", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "📋",
     },
 ]

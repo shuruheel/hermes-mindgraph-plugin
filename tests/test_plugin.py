@@ -177,9 +177,9 @@ class TestPrefetch:
 
 class TestGetToolSchemas:
 
-    def test_returns_eleven_schemas(self, provider):
+    def test_returns_four_schemas(self, provider):
         schemas = provider.get_tool_schemas()
-        assert len(schemas) == 11
+        assert len(schemas) == 4
 
     def test_all_schemas_have_name_and_parameters(self, provider):
         for schema in provider.get_tool_schemas():
@@ -189,10 +189,8 @@ class TestGetToolSchemas:
     def test_schema_names_match_expected(self, provider):
         names = {s["name"] for s in provider.get_tool_schemas()}
         expected = {
-            "mindgraph_session", "mindgraph_journal", "mindgraph_argue",
-            "mindgraph_commit", "mindgraph_retrieve", "mindgraph_ingest",
-            "mindgraph_capture", "mindgraph_inquire", "mindgraph_action",
-            "mindgraph_decide", "mindgraph_plan",
+            "mindgraph_remember", "mindgraph_retrieve",
+            "mindgraph_commit", "mindgraph_ingest",
         }
         assert names == expected
 
@@ -204,16 +202,40 @@ class TestGetToolSchemas:
 class TestHandleToolCall:
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
-    def test_dispatches_journal(self, mock_get, provider):
+    def test_dispatches_remember_note(self, mock_get, provider):
         client = MagicMock()
         client.journal.return_value = {"uid": "j1", "label": "test entry"}
         mock_get.return_value = client
 
         result = json.loads(provider.handle_tool_call(
-            "mindgraph_journal", {"entry": "test note", "entry_type": "note"},
+            "mindgraph_remember", {"label": "test note", "action": "note"},
         ))
         assert result["success"] is True
         client.journal.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_dispatches_remember_entity(self, mock_get, provider):
+        client = MagicMock()
+        client.find_or_create_person.return_value = {"uid": "p1", "label": "Alice"}
+        mock_get.return_value = client
+
+        result = json.loads(provider.handle_tool_call(
+            "mindgraph_remember", {"label": "Alice", "action": "entity", "entity_type": "person"},
+        ))
+        assert result["success"] is True
+        client.find_or_create_person.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_dispatches_remember_claim(self, mock_get, provider):
+        client = MagicMock()
+        client.argue.return_value = {"uid": "c1", "label": "test claim"}
+        mock_get.return_value = client
+
+        result = json.loads(provider.handle_tool_call(
+            "mindgraph_remember", {"label": "test claim", "action": "claim"},
+        ))
+        assert result["success"] is True
+        client.argue.assert_called_once()
 
     def test_unknown_tool_returns_error(self, provider):
         result = json.loads(provider.handle_tool_call("nonexistent_tool", {}))
@@ -221,9 +243,8 @@ class TestHandleToolCall:
         assert "Unknown tool" in result["error"]
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
-    def test_dispatches_retrieve(self, mock_get, provider):
+    def test_dispatches_retrieve_fts(self, mock_get, provider):
         client = MagicMock()
-        # _fts_search prefers client.search() — mock enriched FTS response
         client.search.return_value = {
             "results": [{"uid": "n1", "label": "test", "node_type": "Concept"}],
             "edges": [],
@@ -237,8 +258,53 @@ class TestHandleToolCall:
         assert result["success"] is True
         assert result["data"]["count"] == 1
         assert result["data"]["results"][0]["uid"] == "n1"
-        # Verify search was called (not hybrid_search or _request)
         client.search.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_dispatches_retrieve_context_default(self, mock_get, provider):
+        """Default mode is now 'context' (hybrid retrieval)."""
+        client = MagicMock()
+        client.retrieve_context.return_value = {
+            "chunks": [],
+            "graph": {
+                "nodes": [{"uid": "n1", "label": "test", "node_type": "Concept"}],
+                "edges": [],
+            },
+        }
+        mock_get.return_value = client
+
+        result = json.loads(provider.handle_tool_call(
+            "mindgraph_retrieve", {"query": "test"},
+        ))
+        assert result["success"] is True
+        assert result["data"]["count"] == 1
+        client.retrieve_context.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_dispatches_commit_goal(self, mock_get, provider):
+        client = MagicMock()
+        client.search.return_value = []
+        client.commit.return_value = {"uid": "g1", "label": "Test goal"}
+        mock_get.return_value = client
+
+        result = json.loads(provider.handle_tool_call(
+            "mindgraph_commit", {"action": "goal", "label": "Test goal"},
+        ))
+        assert result["success"] is True
+        client.commit.assert_called_once()
+
+    @patch("hermes_mindgraph_plugin.tools._get_client")
+    def test_dispatches_commit_question(self, mock_get, provider):
+        """Verify inquire actions route through commit."""
+        client = MagicMock()
+        client.inquire.return_value = {"uid": "q1", "label": "Test question"}
+        mock_get.return_value = client
+
+        result = json.loads(provider.handle_tool_call(
+            "mindgraph_commit", {"action": "question", "label": "Test question"},
+        ))
+        assert result["success"] is True
+        client.inquire.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -550,74 +616,74 @@ class TestOnMemoryWrite:
 # Capture typed routing (preserved from original tests)
 # ---------------------------------------------------------------------------
 
-class TestCaptureTypedRouting:
-    """Test that mindgraph_capture routes to typed SDK methods."""
+class TestRememberEntityRouting:
+    """Test that mindgraph_remember(action='entity') routes to typed SDK methods."""
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_person_routes_to_find_or_create_person(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_person.return_value = {"uid": "p1", "label": "Alice"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture("Alice", capture_type="entity", entity_type="person"))
+        result = json.loads(mindgraph_remember("Alice", action="entity", entity_type="person"))
         assert result["success"] is True
         client.find_or_create_person.assert_called_once_with("Alice", props=None)
         client.find_or_create_entity.assert_not_called()
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_organization_routes_to_typed_method(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_organization.return_value = {"uid": "o1", "label": "Acme"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture("Acme", capture_type="entity", entity_type="organization"))
+        result = json.loads(mindgraph_remember("Acme", action="entity", entity_type="organization"))
         assert result["success"] is True
         client.find_or_create_organization.assert_called_once()
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_nation_routes_to_typed_method(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_nation.return_value = {"uid": "n1", "label": "Japan"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture("Japan", capture_type="entity", entity_type="nation"))
+        result = json.loads(mindgraph_remember("Japan", action="entity", entity_type="nation"))
         assert result["success"] is True
         client.find_or_create_nation.assert_called_once()
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_concept_routes_to_typed_method(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_concept.return_value = {"uid": "c1", "label": "Entropy"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture("Entropy", capture_type="entity", entity_type="concept"))
+        result = json.loads(mindgraph_remember("Entropy", action="entity", entity_type="concept"))
         assert result["success"] is True
         client.find_or_create_concept.assert_called_once()
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_work_falls_back_to_generic(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_entity.return_value = {"uid": "w1", "label": "Hamlet"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture("Hamlet", capture_type="entity", entity_type="work"))
+        result = json.loads(mindgraph_remember("Hamlet", action="entity", entity_type="work"))
         assert result["success"] is True
         client.find_or_create_entity.assert_called_once_with("Hamlet", props={"entity_type": "work"})
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_properties_passed_to_typed_method(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.find_or_create_person.return_value = {"uid": "p2", "label": "Bob"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture(
-            "Bob", capture_type="entity", entity_type="person",
+        result = json.loads(mindgraph_remember(
+            "Bob", action="entity", entity_type="person",
             properties={"role": "engineer", "company": "Acme"},
         ))
         assert result["success"] is True
@@ -628,7 +694,7 @@ class TestCaptureTypedRouting:
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_all_typed_methods_covered(self, mock_get):
         """Ensure all 6 typed entity types route to their specific method."""
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         mock_get.return_value = client
 
@@ -641,7 +707,7 @@ class TestCaptureTypedRouting:
             ("concept", "find_or_create_concept"),
         ]:
             getattr(client, method).return_value = {"uid": "x", "label": "test"}
-            mindgraph_capture("test", capture_type="entity", entity_type=etype)
+            mindgraph_remember("test", action="entity", entity_type=etype)
             getattr(client, method).assert_called()
 
 
@@ -650,19 +716,19 @@ class TestCaptureTypedRouting:
 # ---------------------------------------------------------------------------
 
 class TestObservationEntityLinking:
-    """Test that observations can be linked to entities via entity_uid."""
+    """Test that remember(action='observation') can link to entities via entity_uid."""
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_observation_creates_edge_when_entity_uid_provided(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.capture.return_value = {"uid": "obs-1", "label": "Alice is a researcher"}
         client.add_edge.return_value = {"uid": "edge-1"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture(
+        result = json.loads(mindgraph_remember(
             "Alice is a researcher",
-            capture_type="observation",
+            action="observation",
             entity_uid="person-alice-uid",
         ))
         assert result["success"] is True
@@ -675,27 +741,27 @@ class TestObservationEntityLinking:
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_observation_no_edge_without_entity_uid(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.capture.return_value = {"uid": "obs-2", "label": "test obs"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture(
-            "test obs", capture_type="observation",
+        result = json.loads(mindgraph_remember(
+            "test obs", action="observation",
         ))
         assert result["success"] is True
         client.add_edge.assert_not_called()
 
     @patch("hermes_mindgraph_plugin.tools._get_client")
     def test_observation_link_failure_is_nonfatal(self, mock_get):
-        from hermes_mindgraph_plugin.tools import mindgraph_capture
+        from hermes_mindgraph_plugin.tools import mindgraph_remember
         client = MagicMock()
         client.capture.return_value = {"uid": "obs-3", "label": "test"}
         client.add_edge.side_effect = Exception("edge creation failed")
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_capture(
-            "test", capture_type="observation", entity_uid="entity-1",
+        result = json.loads(mindgraph_remember(
+            "test", action="observation", entity_uid="entity-1",
         ))
         # Should succeed even though edge creation failed
         assert result["success"] is True
@@ -718,7 +784,7 @@ class TestCommitDedup:
         ]
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="Ship v2.0"))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
         assert result["data"]["uid"] == "goal-1"
@@ -735,7 +801,7 @@ class TestCommitDedup:
         mock_get.return_value = client
 
         result = json.loads(mindgraph_commit(
-            label="Ship v2.0", commit_type="goal", status="completed",
+            action="goal", label="Ship v2.0", status="completed",
         ))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
@@ -751,7 +817,7 @@ class TestCommitDedup:
         ]
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="Ship V2.0"))
+        result = json.loads(mindgraph_commit(action="goal", label="Ship V2.0"))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
 
@@ -763,7 +829,7 @@ class TestCommitDedup:
         client.commit.return_value = {"uid": "new-1", "label": "New Goal"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="New Goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="New Goal"))
         assert result["success"] is True
         assert "deduplicated" not in result.get("data", {})
         client.commit.assert_called_once()
@@ -776,7 +842,7 @@ class TestCommitDedup:
         mock_get.return_value = client
 
         result = json.loads(mindgraph_commit(
-            uid="goal-1", status="completed", description="Done!",
+            action="goal", uid="goal-1", status="completed", description="Done!",
         ))
         assert result["success"] is True
         client.update_node.assert_called_once_with(
@@ -794,7 +860,7 @@ class TestCommitDedup:
         client.commit.return_value = {"uid": "new-2", "label": "My Goal"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="My Goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="My Goal"))
         assert result["success"] is True
         client.commit.assert_called_once()
 
@@ -838,7 +904,7 @@ class TestFuzzyDedup:
         mock_get.return_value = client
 
         # Commit uses abbreviated form
-        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="Ship v2.0"))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
         assert result["data"]["uid"] == "goal-1"
@@ -855,7 +921,7 @@ class TestFuzzyDedup:
         client.commit.return_value = {"uid": "new-1", "label": "Ship v2.0"}
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="Ship v2.0"))
         assert result["success"] is True
         # Should create new — not dedup against a dissimilar label
         assert "deduplicated" not in result.get("data", {})
@@ -872,7 +938,7 @@ class TestFuzzyDedup:
         ]
         mock_get.return_value = client
 
-        result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+        result = json.loads(mindgraph_commit(action="goal", label="Ship v2.0"))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
         # Should pick the exact match
@@ -891,7 +957,7 @@ class TestFuzzyDedup:
         mock_get.return_value = client
 
         with patch("hermes_mindgraph_plugin.tools.DEDUP_FUZZY_THRESHOLD", 1.0):
-            result = json.loads(mindgraph_commit(label="Ship v2.0", commit_type="goal"))
+            result = json.loads(mindgraph_commit(action="goal", label="Ship v2.0"))
 
         # No exact match and fuzzy disabled → create new
         assert result["success"] is True
@@ -908,7 +974,7 @@ class TestFuzzyDedup:
         mock_get.return_value = client
 
         result = json.loads(mindgraph_commit(
-            label="Ship v2.0", commit_type="goal", status="completed",
+            action="goal", label="Ship v2.0", status="completed",
         ))
         assert result["success"] is True
         assert result["data"]["deduplicated"] is True
@@ -950,9 +1016,9 @@ class TestConfiguration:
         assert "uid" in props
         assert props["uid"]["type"] == "string"
 
-    def test_capture_schema_has_entity_uid_param(self):
-        from hermes_mindgraph_plugin.tools import MINDGRAPH_CAPTURE_SCHEMA
-        props = MINDGRAPH_CAPTURE_SCHEMA["parameters"]["properties"]
+    def test_remember_schema_has_entity_uid_param(self):
+        from hermes_mindgraph_plugin.tools import MINDGRAPH_REMEMBER_SCHEMA
+        props = MINDGRAPH_REMEMBER_SCHEMA["parameters"]["properties"]
         assert "entity_uid" in props
         assert props["entity_uid"]["type"] == "string"
 
