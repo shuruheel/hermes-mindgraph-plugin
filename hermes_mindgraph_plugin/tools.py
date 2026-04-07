@@ -1267,7 +1267,7 @@ def mindgraph_commit(
 def mindgraph_retrieve(
     query: str = "",
     mode: str = "context",
-    limit: int = 10,
+    limit: int = 27,
     include_chunks: bool = False,
     include_graph: bool = True,
     node_type: str = "",
@@ -1787,7 +1787,7 @@ MINDGRAPH_RETRIEVE_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Max results to return. Default: 10.",
+                "description": "Max results to return. Default: 27.",
                 "minimum": 1,
                 "maximum": 50,
             },
@@ -1940,7 +1940,7 @@ TOOLS = [
         "handler": lambda args, **kw: mindgraph_retrieve(
             query=args.get("query", ""),
             mode=args.get("mode", "context"),
-            limit=args.get("limit", 10),
+            limit=args.get("limit", 27),
             include_chunks=args.get("include_chunks", False),
             include_graph=args.get("include_graph", True),
             node_type=args.get("node_type", ""),
