@@ -1304,9 +1304,9 @@ def mindgraph_retrieve(
         if mode == "context":
             return client.retrieve_context(
                 query,
-                k=limit,
+                node_limit=limit,
                 node_types=[node_type] if node_type else None,
-                include_chunks=include_chunks,
+                chunk_limit=limit if include_chunks else 0,
                 include_graph=include_graph,
             )
         elif mode == "search":
@@ -1515,8 +1515,8 @@ def proactive_graph_retrieve(user_message: str, k: int = 0) -> Optional[str]:
     try:
         raw = client.retrieve_context(
             stripped[:500],
-            k=k,
-            include_chunks=False,
+            node_limit=k,
+            chunk_limit=0,
             include_graph=True,
         )
     except Exception as e:
