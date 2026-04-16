@@ -3,14 +3,20 @@
 Activate it as your memory provider:
 
 ```
-hermes memory setup hermes-mindgraph-plugin
+hermes memory setup
 ```
 
-That will:
+That opens an interactive picker — select `hermes-mindgraph-plugin`. Setup will:
 
 1. Install `mindgraph-sdk` into the Hermes environment.
-2. Prompt for your `MINDGRAPH_API_KEY` (get one at https://mindgraph.cloud).
-3. Write `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+2. Write `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+
+If you haven't already set your `MINDGRAPH_API_KEY` (get one at https://mindgraph.cloud), the plugin install step prompted for it. You can also add these optional overrides to `~/.hermes/.env`:
+
+```
+MINDGRAPH_BASE_URL=https://api.mindgraph.cloud   # override for self-hosted
+MINDGRAPH_AGENT_ID=hermes                         # provenance tag on writes
+```
 
 Next conversation, Hermes will:
 

@@ -9,11 +9,18 @@ Every conversation opens a MindGraph session, bakes your active goals and polici
 ## Install
 
 ```bash
-hermes plugins install shuruheel/hermes-mindgraph-plugin
-hermes memory setup hermes-mindgraph-plugin
+hermes plugins install shuruheel/hermes-mindgraph-plugin   # prompts for MINDGRAPH_API_KEY
+hermes memory setup                                         # pick "hermes-mindgraph-plugin"
 ```
 
-`hermes plugins install` clones the repo to `~/.hermes/plugins/hermes-mindgraph-plugin/`. `hermes memory setup` then installs `mindgraph-sdk`, prompts for your `MINDGRAPH_API_KEY` (get one at [mindgraph.cloud](https://mindgraph.cloud)), and writes `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+`hermes plugins install` clones the repo to `~/.hermes/plugins/hermes-mindgraph-plugin/` and prompts for your `MINDGRAPH_API_KEY` (get one at [mindgraph.cloud](https://mindgraph.cloud)). `hermes memory setup` then opens an interactive picker — select this plugin to install `mindgraph-sdk` and write `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+
+Optional overrides (not prompted — set manually in `~/.hermes/.env` if needed):
+
+```
+MINDGRAPH_BASE_URL=https://api.mindgraph.cloud   # override for self-hosted
+MINDGRAPH_AGENT_ID=hermes                         # provenance tag on writes
+```
 
 Only one external memory provider is active at a time — setup will swap out any previously configured provider.
 

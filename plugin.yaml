@@ -12,7 +12,7 @@ requires_env:
     description: "MindGraph API key"
     url: "https://mindgraph.cloud"
     secret: true
-  - name: MINDGRAPH_BASE_URL
-    description: "API endpoint (optional — override for self-hosted deployments)"
-  - name: MINDGRAPH_AGENT_ID
-    description: "Agent identifier stamped onto every write (optional, default: hermes)"
+
+# Optional env vars (not prompted — set manually in ~/.hermes/.env if needed):
+#   MINDGRAPH_BASE_URL   Override the API endpoint (default: https://api.mindgraph.cloud)
+#   MINDGRAPH_AGENT_ID   Stamped on every write for provenance (default: hermes)
