@@ -1,10 +1,12 @@
 """MindGraph semantic graph memory integration.
 
-Provides 4 tools for persistent semantic memory:
+Provides 5 tools for persistent semantic memory:
   - mindgraph_remember: store knowledge (entities, observations, claims, preferences, notes)
   - mindgraph_retrieve: query the graph (hybrid FTS+semantic, FTS-only, structured queries)
   - mindgraph_commit: track agentic state (goals, decisions, plans, tasks, risks, questions)
   - mindgraph_ingest: long-form content ingestion
+  - mindgraph_synthesize: cross-document synthesis over project-scoped corpora
+    (signal mining + LLM-generated Article nodes)
 
 Session lifecycle (open/close) is fully automatic via __init__.py hooks.
 Session-start context (active goals, projects, tasks) is injected into the
@@ -512,8 +514,9 @@ def retrieve_session_context() -> Optional[str]:
         "MindGraph is not a tool you use when asked — it is how you think. Every conversation "
         "produces knowledge. Your job is to route that knowledge to the right place in the graph "
         "so your future selves can act on it.\n\n"
-        "You have 4 tools: **remember** (store knowledge), **retrieve** (query knowledge), "
-        "**commit** (track goals/decisions/plans/risks/questions), **ingest** (bulk content).\n\n"
+        "You have 5 tools: **remember** (store knowledge), **retrieve** (query knowledge), "
+        "**commit** (track goals/decisions/plans/risks/questions), **ingest** (bulk content), "
+        "**synthesize** (project-scoped cross-document synthesis — signals + Article generation).\n\n"
         #
         # ── Behavioral contract ──
         #
@@ -1697,6 +1700,63 @@ def mindgraph_ingest(
         })
 
 
+def mindgraph_synthesize(
+    action: str = "signals",
+    project_uid: str = "",
+    signals: str = "",
+    target_types: str = "",
+    job_id: str = "",
+) -> str:
+    """Work with Projects: scoped document corpora and cross-document synthesis.
+
+    Actions:
+    - ``signals`` — mine structural signals across a project corpus
+      (entity bridges, claim hubs, theory gaps, concept clusters,
+      analogy candidates, dialectical pairs). No LLM calls.
+    - ``run`` — spawn a background synthesis job that turns top idea
+      clusters into Article nodes. Returns a ``job_id``.
+    - ``job_status`` — poll a synthesis job by ``job_id``.
+    """
+    action = (action or "signals").lower()
+
+    if action == "signals":
+        if not project_uid:
+            return _json_response(False, error="project_uid is required for action='signals'")
+        kwargs = {}
+        if signals:
+            kwargs["signals"] = signals
+        if target_types:
+            kwargs["target_types"] = target_types
+        result, err = _safe_call(
+            lambda c: c.signals(project_uid, **kwargs),
+        )
+        if err:
+            return _json_response(False, error=f"Signals failed: {err}")
+        return _json_response(True, data=result)
+
+    if action == "run":
+        if not project_uid:
+            return _json_response(False, error="project_uid is required for action='run'")
+        result, err = _safe_call(
+            lambda c: c.run_synthesis(project_uid),
+        )
+        if err:
+            return _json_response(False, error=f"Synthesis run failed: {err}")
+        return _json_response(True, data=result)
+
+    if action == "job_status":
+        if not job_id:
+            return _json_response(False, error="job_id is required for action='job_status'")
+        result, err = _safe_call(
+            lambda c: c.get_job(job_id),
+        )
+        if err:
+            return _json_response(False, error=f"Job status failed: {err}")
+        return _json_response(True, data=result)
+
+    return _json_response(False, error=f"Unknown synthesize action: {action}")
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas (OpenAI format)
 # ---------------------------------------------------------------------------
@@ -1910,8 +1970,50 @@ MINDGRAPH_INGEST_SCHEMA = {
 }
 
 
+MINDGRAPH_SYNTHESIZE_SCHEMA = {
+    "name": "mindgraph_synthesize",
+    "description": (
+        "Work with Projects (scoped document corpora) and run cross-document synthesis.\n"
+        "- signals: Mine structural signals across a project corpus (entity bridges, claim hubs, "
+        "theory gaps, concept clusters, analogy candidates, dialectical pairs). No LLM.\n"
+        "- run: Spawn an async synthesis job that turns top idea clusters into Article nodes. "
+        "Returns a job_id.\n"
+        "- job_status: Poll a synthesis job by job_id.\n"
+        "Create projects via mindgraph_commit(action='goal' with type='project') or direct API. "
+        "Link documents to a project via PartOfProject edges."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["signals", "run", "job_status"],
+                "description": "Synthesis action. Default: signals.",
+            },
+            "project_uid": {
+                "type": "string",
+                "description": "UID of the Project node (required for signals/run).",
+            },
+            "signals": {
+                "type": "string",
+                "description": "Comma-separated signal names to compute (e.g. 'clustered_claim_hubs,dialectical_pairs'). Defaults to all. Only for action='signals'.",
+            },
+            "target_types": {
+                "type": "string",
+                "description": "Comma-separated node types to filter entity_bridges and claim_hubs (e.g. 'Person,Organization,Theory'). Only for action='signals'.",
+            },
+            "job_id": {
+                "type": "string",
+                "description": "Job ID to poll. Required for action='job_status'.",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
-# TOOLS list for plugin registration (4 tools)
+# TOOLS list for plugin registration (5 tools)
 # ---------------------------------------------------------------------------
 
 TOOLS = [
@@ -1982,5 +2084,20 @@ TOOLS = [
         "check_fn": check_requirements,
         "requires_env": ["MINDGRAPH_API_KEY"],
         "emoji": "📥",
+    },
+    {
+        "name": "mindgraph_synthesize",
+        "toolset": "mindgraph",
+        "schema": MINDGRAPH_SYNTHESIZE_SCHEMA,
+        "handler": lambda args, **kw: mindgraph_synthesize(
+            action=args.get("action", "signals"),
+            project_uid=args.get("project_uid", ""),
+            signals=args.get("signals", ""),
+            target_types=args.get("target_types", ""),
+            job_id=args.get("job_id", ""),
+        ),
+        "check_fn": check_requirements,
+        "requires_env": ["MINDGRAPH_API_KEY"],
+        "emoji": "🧪",
     },
 ]

@@ -6,7 +6,7 @@ Implements the Hermes **MemoryProvider** plugin interface for deep lifecycle int
 
 ## What You Get
 
-**4 tools** for persistent semantic memory:
+**5 tools** for persistent semantic memory:
 
 | Tool | Purpose |
 |------|---------|
@@ -14,6 +14,7 @@ Implements the Hermes **MemoryProvider** plugin interface for deep lifecycle int
 | `mindgraph_retrieve` | Query the graph — hybrid search (FTS + semantic), structured queries |
 | `mindgraph_commit` | Track agentic state — goals, decisions, plans, tasks, risks, questions |
 | `mindgraph_ingest` | Bulk content ingestion (articles, transcripts, code) |
+| `mindgraph_synthesize` | Project-scoped cross-document synthesis — mine signals, spawn Article-generation jobs |
 
 **Hybrid retrieval** (FTS + semantic) via `/retrieve/context` — natural language queries work out of the box. Falls back to FTS-only when no embedding provider is configured.
 

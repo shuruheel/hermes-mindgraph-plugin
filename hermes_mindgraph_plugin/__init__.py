@@ -15,7 +15,7 @@ It can also be installed manually by copying this package to
 ``~/.hermes/plugins/memory/mindgraph/`` with an accompanying ``plugin.yaml``.
 
 What you get:
-    4 MindGraph tools — remember, retrieve, commit, ingest —
+    5 MindGraph tools — remember, retrieve, commit, ingest, synthesize —
     registered via get_tool_schemas().
 
     Lifecycle hooks — initialize, system_prompt_block, prefetch, sync_turn,
@@ -23,9 +23,12 @@ What you get:
     management, context injection, and transcript ingestion.
 
     Per-turn hybrid retrieval (FTS + semantic) for natural language queries.
+
+    Project-scoped synthesis: mine cross-document signals and spawn
+    synthesis jobs that turn top idea clusters into Article nodes.
 """
 
-__version__ = "0.6.2"
+__version__ = "0.8.0"
 
 import json
 import logging
@@ -54,7 +57,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
     Implements the Hermes MemoryProvider interface to provide:
     - Session-start context injection (goals, decisions, policies, weak claims)
     - Per-turn hybrid retrieval (FTS + semantic via /retrieve/context)
-    - 4 tools: remember, retrieve, commit, ingest
+    - 5 tools: remember, retrieve, commit, ingest, synthesize
     - Post-session transcript ingestion for cross-session continuity
     """
 
@@ -134,7 +137,7 @@ class MindGraphMemoryProvider(_MemoryProviderBase):
             logger.debug("MindGraph session context prefetch failed: %s", exc)
 
     def get_tool_schemas(self) -> list:
-        """Return OpenAI function-calling schemas for all 11 MindGraph tools."""
+        """Return OpenAI function-calling schemas for all MindGraph tools."""
         try:
             from hermes_mindgraph_plugin.tools import TOOLS
             return [t["schema"] for t in TOOLS]
