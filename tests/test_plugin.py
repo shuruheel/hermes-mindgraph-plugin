@@ -194,7 +194,9 @@ class TestManifest:
         import yaml
         import hermes_mindgraph_plugin as plugin
 
-        path = Path(plugin.__file__).resolve().parent.parent / "plugin.yaml"
+        # The flat-layout plugin's __file__ is the repo-root __init__.py,
+        # so the manifest lives next to it, not one level up.
+        path = Path(plugin.__file__).resolve().parent / "plugin.yaml"
         return yaml.safe_load(path.read_text())
 
     def test_version_matches_package(self):
