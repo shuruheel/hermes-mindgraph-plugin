@@ -2,10 +2,10 @@
 
 Installs via::
 
-    hermes plugins install shuruheel/hermes-mindgraph-plugin
-    hermes memory setup   # interactive picker — select hermes-mindgraph-plugin
+    hermes plugins install shuruheel/mindgraph
+    hermes memory setup   # interactive picker — select mindgraph
 
-Once activated (``memory.provider: hermes-mindgraph-plugin`` in
+Once activated (``memory.provider: mindgraph`` in
 ``~/.hermes/config.yaml``), the MemoryManager calls this provider's
 lifecycle methods on every conversation: opening a MindGraph session,
 baking active goals/policies/questions into the system prompt, prefetching
@@ -26,8 +26,8 @@ __version__ = "0.10.0"
 # ---------------------------------------------------------------------------
 #
 # Hermes's user-plugin loader (``plugins/memory/__init__.py``:_load_provider_
-# from_dir) synthesizes a package name like ``_hermes_user_memory.hermes-
-# mindgraph-plugin`` for user-installed plugins, but:
+# from_dir) synthesizes a package name like ``_hermes_user_memory.<dirname>``
+# for user-installed plugins, but:
 #
 #   1. It does not register the ``_hermes_user_memory`` parent namespace in
 #      ``sys.modules``, so relative imports that traverse through it fail

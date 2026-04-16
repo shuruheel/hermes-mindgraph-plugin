@@ -1,7 +1,7 @@
 """Test config — loads the flat-layout plugin under a stable import name.
 
-Hermes clones this plugin into ``~/.hermes/plugins/hermes-mindgraph-plugin/`` and
-loads the repo-root ``__init__.py`` directly — the repo root IS the package.
+Hermes clones this plugin into ``~/.hermes/plugins/mindgraph/`` and loads the
+repo-root ``__init__.py`` directly — the repo root IS the package.
 The repo directory name contains hyphens, so it can't be imported via a normal
 ``import`` statement. This conftest uses ``importlib.util`` to load the
 package under the name ``hermes_mindgraph_plugin`` so tests can ``import``

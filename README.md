@@ -1,4 +1,4 @@
-# hermes-mindgraph-plugin
+# mindgraph — Hermes memory provider
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -9,11 +9,11 @@ Every conversation opens a MindGraph session, bakes your active goals and polici
 ## Install
 
 ```bash
-hermes plugins install shuruheel/hermes-mindgraph-plugin   # prompts for MINDGRAPH_API_KEY
-hermes memory setup                                         # pick "hermes-mindgraph-plugin"
+hermes plugins install shuruheel/mindgraph   # prompts for MINDGRAPH_API_KEY
+hermes memory setup                          # pick "mindgraph" in the picker
 ```
 
-`hermes plugins install` clones the repo to `~/.hermes/plugins/hermes-mindgraph-plugin/` and prompts for your `MINDGRAPH_API_KEY` (get one at [mindgraph.cloud](https://mindgraph.cloud)). `hermes memory setup` then opens an interactive picker — select this plugin to install `mindgraph-sdk` and write `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+`hermes plugins install` clones the repo to `~/.hermes/plugins/mindgraph/` and prompts for your `MINDGRAPH_API_KEY` (get one at [mindgraph.cloud](https://mindgraph.cloud)). `hermes memory setup` then opens an interactive picker — select this plugin to install `mindgraph-sdk` and write `memory.provider: mindgraph` to `~/.hermes/config.yaml`.
 
 Optional overrides (not prompted — set manually in `~/.hermes/.env` if needed):
 
@@ -49,7 +49,7 @@ Subagent and cron contexts skip session open/close (the plugin checks `agent_con
 | `mindgraph_ingest` | Bulk content ingestion (articles, transcripts, code) |
 | `mindgraph_synthesize` | Project-scoped cross-document synthesis — mine signals, generate Article nodes |
 
-See [`hermes_mindgraph_plugin/tools.py`](hermes_mindgraph_plugin/tools.py) for action tables and parameter details; the behavioral contract the agent sees is in [`provider.py`](hermes_mindgraph_plugin/provider.py).
+See [`tools.py`](tools.py) for action tables and parameter details; the behavioral contract the agent sees is in [`provider.py`](provider.py).
 
 ## Architecture
 
@@ -72,12 +72,12 @@ The behavioral contract injected into the system prompt teaches the agent when t
 ## Repo layout
 
 ```
-hermes_mindgraph_plugin/
-├── __init__.py     # register(ctx) — hands a MindGraphMemoryProvider to Hermes
-├── provider.py     # MindGraphMemoryProvider(MemoryProvider)
-└── tools.py        # SDK glue: handlers, schemas, session helpers
-plugin.yaml          # Hermes manifest (pip_dependencies, requires_env)
-after-install.md     # Rendered by Hermes after install
+mindgraph/
+├── __init__.py       # register(ctx) — hands a MindGraphMemoryProvider to Hermes
+├── provider.py       # MindGraphMemoryProvider(MemoryProvider)
+├── tools.py          # SDK glue: handlers, schemas, session helpers
+├── plugin.yaml       # Hermes manifest (pip_dependencies, requires_env)
+└── after-install.md  # Rendered by Hermes after install
 ```
 
 ## License

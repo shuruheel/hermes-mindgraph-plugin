@@ -1,4 +1,4 @@
-"""Tests for hermes-mindgraph-plugin — MemoryProvider interface contract.
+"""Tests for the mindgraph memory provider — MemoryProvider interface contract.
 
 These tests verify:
 

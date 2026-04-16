@@ -1,5 +1,5 @@
 manifest_version: 1
-name: hermes-mindgraph-plugin
+name: mindgraph
 version: 0.10.0
 description: "MindGraph — semantic graph memory with hybrid retrieval, goal/decision tracking, and cross-document synthesis."
 author: Shan Rizvi
