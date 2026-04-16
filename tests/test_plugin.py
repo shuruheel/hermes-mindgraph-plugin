@@ -1,13 +1,22 @@
-"""Tests for hermes-mindgraph-plugin (Hermes plugin interface).
+"""Tests for hermes-mindgraph-plugin — MemoryProvider interface contract.
 
-These tests verify the plugin wiring against the Hermes
-``PluginContext`` API — ``register_tool`` and ``register_hook``. They do
-not hit the MindGraph backend; every outbound SDK call is mocked.
+These tests verify:
+
+1. ``register(ctx)`` invokes ``ctx.register_memory_provider`` exactly once.
+2. The provider implements every method the MemoryManager calls.
+3. Tool schemas match OpenAI function-calling shape.
+4. Tool dispatch routes by name and returns JSON strings.
+5. ``plugin.yaml`` is internally consistent with the code.
+
+Backend calls are either mocked or short-circuited via missing credentials;
+no tests hit the real MindGraph API.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -17,221 +26,191 @@ from unittest.mock import MagicMock, patch
 
 
 class TestRegister:
-    """The plugin entry point wires tools + hooks onto the PluginContext."""
+    """register(ctx) hands a single MemoryProvider instance to Hermes."""
 
-    def test_registers_all_tools(self):
+    def test_registers_memory_provider(self):
         import hermes_mindgraph_plugin as plugin
-        from hermes_mindgraph_plugin.tools import TOOLS
 
         ctx = MagicMock()
         plugin.register(ctx)
 
-        assert ctx.register_tool.call_count == len(TOOLS)
-        registered_names = {
-            call.kwargs["name"] for call in ctx.register_tool.call_args_list
+        ctx.register_memory_provider.assert_called_once()
+        (provider,), _ = ctx.register_memory_provider.call_args
+        assert provider.name == "mindgraph"
+
+    def test_register_does_not_touch_tool_or_hook_api(self):
+        """Old pip-plugin registration paths are gone — nothing should call them."""
+        import hermes_mindgraph_plugin as plugin
+
+        ctx = MagicMock()
+        plugin.register(ctx)
+
+        ctx.register_tool.assert_not_called()
+        ctx.register_hook.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MindGraphMemoryProvider — interface contract
+# ---------------------------------------------------------------------------
+
+
+class TestProviderContract:
+    """The provider implements every MemoryManager-called method."""
+
+    def _provider(self):
+        from hermes_mindgraph_plugin.provider import MindGraphMemoryProvider
+
+        return MindGraphMemoryProvider()
+
+    def test_name(self):
+        assert self._provider().name == "mindgraph"
+
+    def test_is_available_requires_api_key(self):
+        p = self._provider()
+        with patch.dict(os.environ, {"MINDGRAPH_API_KEY": ""}, clear=False):
+            # Explicitly clear the env var; patch.dict won't remove it unless we tell it to
+            os.environ.pop("MINDGRAPH_API_KEY", None)
+            assert p.is_available() is False
+
+    def test_get_config_schema_shape(self):
+        schema = self._provider().get_config_schema()
+        assert isinstance(schema, list)
+        keys = {field["key"] for field in schema}
+        assert "api_key" in keys
+        # api_key entry is secret and required
+        api_key_entry = next(f for f in schema if f["key"] == "api_key")
+        assert api_key_entry.get("secret") is True
+        assert api_key_entry.get("required") is True
+        assert api_key_entry.get("env_var") == "MINDGRAPH_API_KEY"
+
+    def test_get_tool_schemas_returns_five_tools(self):
+        schemas = self._provider().get_tool_schemas()
+        assert len(schemas) == 5
+        names = {s["name"] for s in schemas}
+        assert names == {
+            "mindgraph_remember",
+            "mindgraph_retrieve",
+            "mindgraph_commit",
+            "mindgraph_ingest",
+            "mindgraph_synthesize",
         }
-        assert registered_names == {t["name"] for t in TOOLS}
 
-    def test_registers_tool_with_hermes_signature(self):
-        """Each register_tool call must use keyword args Hermes understands."""
-        import hermes_mindgraph_plugin as plugin
+    def test_tool_schemas_have_openai_function_shape(self):
+        for s in self._provider().get_tool_schemas():
+            assert "name" in s
+            assert "description" in s
+            assert "parameters" in s
+            assert s["parameters"].get("type") == "object"
 
-        ctx = MagicMock()
-        plugin.register(ctx)
+    def test_lifecycle_methods_are_callable(self):
+        """Every MemoryManager-invoked method must be present and not raise."""
+        p = self._provider()
+        # These call the MindGraph SDK but should swallow errors when the
+        # client isn't configured (no MINDGRAPH_API_KEY set in test env).
+        os.environ.pop("MINDGRAPH_API_KEY", None)
 
-        for call in ctx.register_tool.call_args_list:
-            assert "name" in call.kwargs
-            assert "toolset" in call.kwargs
-            assert "schema" in call.kwargs
-            assert "handler" in call.kwargs
-            assert callable(call.kwargs["handler"])
-            assert isinstance(call.kwargs["schema"], dict)
+        p.initialize("test-session-123")
+        _ = p.system_prompt_block()
+        p.queue_prefetch("hello world")
+        _ = p.prefetch("hello world")
+        p.sync_turn("u", "a")
+        p.on_session_end([{"role": "user", "content": "hi"}])
+        p.shutdown()
 
-    def test_registers_session_lifecycle_hooks(self):
-        import hermes_mindgraph_plugin as plugin
+    def test_non_primary_context_skips_session_open(self):
+        """Subagents and cron runs should not open graph sessions."""
+        from hermes_mindgraph_plugin import tools
 
-        ctx = MagicMock()
-        plugin.register(ctx)
+        p = self._provider()
+        with patch.object(tools, "auto_open_session") as mock_open:
+            p.initialize("s1", agent_context="subagent")
+            mock_open.assert_not_called()
 
-        hook_names = {call.args[0] for call in ctx.register_hook.call_args_list}
-        assert "on_session_start" in hook_names
-        assert "on_session_end" in hook_names
+    def test_primary_context_opens_session(self):
+        from hermes_mindgraph_plugin import tools
 
-    def test_registered_tool_schemas_have_required_fields(self):
-        """Tool schemas must match OpenAI function-calling shape."""
-        import hermes_mindgraph_plugin as plugin
-
-        ctx = MagicMock()
-        plugin.register(ctx)
-
-        for call in ctx.register_tool.call_args_list:
-            schema = call.kwargs["schema"]
-            assert "name" in schema
-            assert "description" in schema
-            assert "parameters" in schema
-            assert schema["parameters"].get("type") == "object"
+        p = self._provider()
+        with patch.object(tools, "auto_open_session", return_value="sess-uid") as mock_open:
+            p.initialize("abcdef1234", agent_context="primary")
+            mock_open.assert_called_once()
+            assert "abcdef12" in mock_open.call_args.kwargs.get("label", "")
 
 
 # ---------------------------------------------------------------------------
-# Tool handlers
+# Tool dispatch
 # ---------------------------------------------------------------------------
 
 
-class TestToolHandlers:
-    """Handlers always return a JSON string, even on error — never raise."""
+class TestToolDispatch:
+    """handle_tool_call routes to the right handler and always returns JSON."""
 
-    def _handler(self, name: str):
-        from hermes_mindgraph_plugin.tools import TOOLS
+    def _provider(self):
+        from hermes_mindgraph_plugin.provider import MindGraphMemoryProvider
 
-        for t in TOOLS:
-            if t["name"] == name:
-                return t["handler"]
-        raise AssertionError(f"Tool {name} not found")
+        return MindGraphMemoryProvider()
 
-    def test_remember_returns_json_string_on_missing_label(self):
-        handler = self._handler("mindgraph_remember")
-        result = handler({})  # No label
+    def test_unknown_tool_returns_error_json(self):
+        result = self._provider().handle_tool_call("not_a_real_tool", {})
         data = json.loads(result)
         assert data["success"] is False
-        assert "error" in data
+        assert "Unknown tool" in data["error"]
 
-    def test_commit_returns_json_string_on_unknown_action(self):
-        handler = self._handler("mindgraph_commit")
-        result = handler({"action": "definitely_not_a_real_action"})
+    def test_remember_missing_label_returns_error_json(self):
+        result = self._provider().handle_tool_call("mindgraph_remember", {})
         data = json.loads(result)
         assert data["success"] is False
 
-    def test_ingest_returns_json_string_on_empty_content(self):
-        handler = self._handler("mindgraph_ingest")
-        result = handler({"content": ""})
+    def test_commit_unknown_action_returns_error_json(self):
+        result = self._provider().handle_tool_call(
+            "mindgraph_commit", {"action": "definitely_not_real", "label": "x"}
+        )
+        data = json.loads(result)
+        assert data["success"] is False
+
+    def test_ingest_empty_content_returns_error_json(self):
+        result = self._provider().handle_tool_call("mindgraph_ingest", {"content": ""})
         data = json.loads(result)
         assert data["success"] is False
         assert "required" in data["error"].lower()
 
-    def test_synthesize_returns_json_string_on_missing_project_uid(self):
-        handler = self._handler("mindgraph_synthesize")
-        result = handler({"action": "signals"})  # No project_uid
+    def test_synthesize_missing_project_uid_returns_error_json(self):
+        result = self._provider().handle_tool_call(
+            "mindgraph_synthesize", {"action": "signals"}
+        )
         data = json.loads(result)
         assert data["success"] is False
         assert "project_uid" in data["error"]
 
-    def test_synthesize_unknown_action_rejected(self):
-        handler = self._handler("mindgraph_synthesize")
-        result = handler({"action": "foo", "project_uid": "p1"})
-        data = json.loads(result)
-        assert data["success"] is False
-
 
 # ---------------------------------------------------------------------------
-# Session lifecycle hooks
-# ---------------------------------------------------------------------------
-
-
-class TestSessionHooks:
-    """Hooks are registered callables that never raise."""
-
-    def test_on_session_start_calls_auto_open(self):
-        import hermes_mindgraph_plugin as plugin
-
-        with patch(
-            "hermes_mindgraph_plugin.tools.auto_open_session"
-        ) as mock_open:
-            mock_open.return_value = "sess_123"
-            plugin._on_session_start(session_id="abcdef1234", platform="cli")
-            mock_open.assert_called_once()
-            assert "abcdef12" in mock_open.call_args.kwargs["label"]
-
-    def test_on_session_end_calls_auto_close(self):
-        import hermes_mindgraph_plugin as plugin
-
-        with patch(
-            "hermes_mindgraph_plugin.tools.auto_close_session"
-        ) as mock_close:
-            plugin._on_session_end(session_id="abcdef1234", platform="cli")
-            mock_close.assert_called_once()
-
-    def test_hooks_swallow_exceptions(self):
-        """A broken MindGraph call must not propagate out of a hook."""
-        import hermes_mindgraph_plugin as plugin
-
-        with patch(
-            "hermes_mindgraph_plugin.tools.auto_open_session",
-            side_effect=RuntimeError("backend down"),
-        ):
-            # Should not raise
-            plugin._on_session_start(session_id="x", platform="cli")
-
-        with patch(
-            "hermes_mindgraph_plugin.tools.auto_close_session",
-            side_effect=RuntimeError("backend down"),
-        ):
-            plugin._on_session_end(session_id="x", platform="cli")
-
-
-# ---------------------------------------------------------------------------
-# Skill installation
-# ---------------------------------------------------------------------------
-
-
-class TestSkillInstall:
-    def test_install_skill_copies_file(self, tmp_path):
-        """When hermes_cli isn't available, fall back to ~/.hermes via Path.home()."""
-        import hermes_mindgraph_plugin as plugin
-
-        with patch("hermes_mindgraph_plugin.Path.home", return_value=tmp_path):
-            plugin._install_skill()
-
-        dest = tmp_path / ".hermes" / "skills" / "mindgraph" / "SKILL.md"
-        assert dest.exists()
-        content = dest.read_text()
-        assert "MindGraph" in content
-        assert "mindgraph_remember" in content
-
-    def test_install_skill_does_not_overwrite_user_edits(self, tmp_path):
-        import hermes_mindgraph_plugin as plugin
-
-        dest_dir = tmp_path / ".hermes" / "skills" / "mindgraph"
-        dest_dir.mkdir(parents=True)
-        dest = dest_dir / "SKILL.md"
-        dest.write_text("USER CUSTOM CONTENT")
-
-        with patch("hermes_mindgraph_plugin.Path.home", return_value=tmp_path):
-            plugin._install_skill()
-
-        assert dest.read_text() == "USER CUSTOM CONTENT"
-
-
-# ---------------------------------------------------------------------------
-# Manifest-level sanity
+# Plugin manifest
 # ---------------------------------------------------------------------------
 
 
 class TestManifest:
-    def test_plugin_yaml_matches_registered_tools(self):
-        import yaml
-        from pathlib import Path
+    """plugin.yaml is internally consistent with the code."""
 
+    def _manifest(self):
+        import yaml
         import hermes_mindgraph_plugin as plugin
 
-        manifest_path = (
-            Path(plugin.__file__).resolve().parent.parent / "plugin.yaml"
-        )
-        manifest = yaml.safe_load(manifest_path.read_text())
+        path = Path(plugin.__file__).resolve().parent.parent / "plugin.yaml"
+        return yaml.safe_load(path.read_text())
 
-        ctx = MagicMock()
-        plugin.register(ctx)
-        registered = {c.kwargs["name"] for c in ctx.register_tool.call_args_list}
-
-        assert set(manifest["provides_tools"]) == registered
-
-    def test_version_in_sync(self):
-        import yaml
-        from pathlib import Path
-
+    def test_version_matches_package(self):
         import hermes_mindgraph_plugin as plugin
 
-        manifest_path = (
-            Path(plugin.__file__).resolve().parent.parent / "plugin.yaml"
-        )
-        manifest = yaml.safe_load(manifest_path.read_text())
-        assert str(manifest["version"]) == plugin.__version__
+        assert str(self._manifest()["version"]) == plugin.__version__
+
+    def test_manifest_version_one(self):
+        assert self._manifest().get("manifest_version") == 1
+
+    def test_requires_env_declares_api_key(self):
+        manifest = self._manifest()
+        env = manifest.get("requires_env") or []
+        names = {e["name"] if isinstance(e, dict) else e for e in env}
+        assert "MINDGRAPH_API_KEY" in names
+
+    def test_pip_dependencies_include_sdk(self):
+        deps = self._manifest().get("pip_dependencies") or []
+        assert any(dep.startswith("mindgraph-sdk") for dep in deps)

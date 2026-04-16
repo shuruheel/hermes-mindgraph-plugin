@@ -1,26 +1,29 @@
-"""MindGraph semantic graph memory integration.
+"""MindGraph semantic graph memory integration — SDK glue layer.
 
-Provides 5 tools for persistent semantic memory:
-  - mindgraph_remember: store knowledge (entities, observations, claims, preferences, notes)
-  - mindgraph_retrieve: query the graph (hybrid FTS+semantic, FTS-only, structured queries)
-  - mindgraph_commit: track agentic state (goals, decisions, plans, tasks, risks, questions)
-  - mindgraph_ingest: long-form content ingestion
-  - mindgraph_synthesize: cross-document synthesis over project-scoped corpora
-    (signal mining + LLM-generated Article nodes)
+This module is the thin layer between Hermes's MemoryProvider interface
+(see ``provider.py``) and the MindGraph Python SDK. It exposes:
 
-Session lifecycle (open/close) is fully automatic via __init__.py hooks.
-Session-start context (active goals, projects, tasks) is injected into the
-system prompt via retrieve_session_context().
+Tool handlers (called by ``MindGraphMemoryProvider.handle_tool_call``):
+  - mindgraph_remember: entities, observations, claims, preferences, notes
+  - mindgraph_retrieve: hybrid FTS + semantic, structured queries, traversal
+  - mindgraph_commit:   goals, decisions, plans, tasks, risks, questions
+  - mindgraph_ingest:   long-form content ingestion
+  - mindgraph_synthesize: cross-document signal mining and article generation
 
-Per-turn retrieval uses hybrid search (FTS + semantic via /retrieve/context)
-so natural-language user messages are handled well.
+Tool schemas (consumed by ``MindGraphMemoryProvider.get_tool_schemas``):
+  - MINDGRAPH_{REMEMBER,RETRIEVE,COMMIT,INGEST,SYNTHESIZE}_SCHEMA
+
+Session helpers (called by provider lifecycle hooks):
+  - auto_open_session       → provider.initialize
+  - retrieve_session_context → provider.system_prompt_block
+  - proactive_graph_retrieve → provider.queue_prefetch
+  - auto_close_session      → provider.on_session_end / shutdown
 
 Graceful degradation: all tools return error JSON on failure rather than
-crashing. If the API is down, tools are still registered but return
-friendly errors. Connection errors auto-reset the client for retry.
+raising. Connection errors auto-reset the SDK client for retry.
 
-This module is self-contained — no Hermes internal imports.
-Only depends on mindgraph-sdk (the `mindgraph` package) and Python stdlib.
+This module depends only on ``mindgraph-sdk`` and the Python stdlib — no
+Hermes internal imports, so it can be exercised in isolation.
 """
 
 import json
@@ -2010,94 +2013,3 @@ MINDGRAPH_SYNTHESIZE_SCHEMA = {
         "required": ["action"],
     },
 }
-
-
-# ---------------------------------------------------------------------------
-# TOOLS list for plugin registration (5 tools)
-# ---------------------------------------------------------------------------
-
-TOOLS = [
-    {
-        "name": "mindgraph_remember",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_REMEMBER_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_remember(
-            label=args.get("label", ""),
-            action=args.get("action", "note"),
-            entity_type=args.get("entity_type", "concept"),
-            properties=args.get("properties"),
-            entity_uid=args.get("entity_uid", ""),
-            evidence=args.get("evidence", ""),
-            warrant=args.get("warrant", ""),
-            confidence=args.get("confidence", 0.7),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🧠",
-    },
-    {
-        "name": "mindgraph_retrieve",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_RETRIEVE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_retrieve(
-            query=args.get("query", ""),
-            mode=args.get("mode", "context"),
-            limit=args.get("limit", 27),
-            include_chunks=args.get("include_chunks", False),
-            include_graph=args.get("include_graph", True),
-            node_type=args.get("node_type", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🔮",
-    },
-    {
-        "name": "mindgraph_commit",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_COMMIT_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_commit(
-            action=args.get("action", "goal"),
-            label=args.get("label", ""),
-            uid=args.get("uid", ""),
-            status=args.get("status", ""),
-            description=args.get("description", ""),
-            summary=args.get("summary", ""),
-            option_label=args.get("option_label", ""),
-            chosen_option_uid=args.get("chosen_option_uid", ""),
-            plan_uid=args.get("plan_uid", ""),
-            task_uid=args.get("task_uid", ""),
-            execution_uid=args.get("execution_uid", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🎯",
-    },
-    {
-        "name": "mindgraph_ingest",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_INGEST_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_ingest(
-            content=args.get("content", ""),
-            source=args.get("source", ""),
-            content_type=args.get("content_type", "text"),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "📥",
-    },
-    {
-        "name": "mindgraph_synthesize",
-        "toolset": "mindgraph",
-        "schema": MINDGRAPH_SYNTHESIZE_SCHEMA,
-        "handler": lambda args, **kw: mindgraph_synthesize(
-            action=args.get("action", "signals"),
-            project_uid=args.get("project_uid", ""),
-            signals=args.get("signals", ""),
-            target_types=args.get("target_types", ""),
-            job_id=args.get("job_id", ""),
-        ),
-        "check_fn": check_requirements,
-        "requires_env": ["MINDGRAPH_API_KEY"],
-        "emoji": "🧪",
-    },
-]

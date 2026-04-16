@@ -1,13 +1,38 @@
 # hermes-mindgraph-plugin
 
-[![PyPI](https://img.shields.io/pypi/v/hermes-mindgraph-plugin)](https://pypi.org/project/hermes-mindgraph-plugin/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-MindGraph semantic graph memory plugin for [Hermes Agent](https://github.com/shuruheel/hermes-agent). One install gives any Hermes-powered agent persistent, structured memory across sessions.
+MindGraph semantic graph memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent), implemented as a [MemoryProvider](https://github.com/NousResearch/hermes-agent/blob/main/agent/memory_provider.py) plugin.
 
-## What You Get
+Every conversation opens a MindGraph session, bakes your active goals and policies into the system prompt, prefetches topic-relevant graph context each turn, exposes 5 graph-memory tools to the model, and ingests the full transcript on session end for 5-layer extraction (Reality, Epistemic, Intent, Action, Memory).
 
-**5 tools** for persistent semantic memory:
+## Install
+
+```bash
+hermes plugins install shuruheel/hermes-mindgraph-plugin
+hermes memory setup hermes-mindgraph-plugin
+```
+
+`hermes plugins install` clones the repo to `~/.hermes/plugins/hermes-mindgraph-plugin/`. `hermes memory setup` then installs `mindgraph-sdk`, prompts for your `MINDGRAPH_API_KEY` (get one at [mindgraph.cloud](https://mindgraph.cloud)), and writes `memory.provider: hermes-mindgraph-plugin` to `~/.hermes/config.yaml`.
+
+Only one external memory provider is active at a time — setup will swap out any previously configured provider.
+
+## What gets wired up
+
+| MemoryProvider method | What it does |
+|-----------------------|--------------|
+| `initialize(session_id)` | Opens a MindGraph `Session` node (`hermes-<session_id[:8]>`). Idempotent — safe for per-message gateway restarts. |
+| `system_prompt_block()` | Injects the behavioral contract + current graph state (active goals, policies, open questions, open decisions, weak claims) into the cached system prompt. |
+| `queue_prefetch(query)` | Fires hybrid FTS + semantic retrieval in a background thread for the *next* turn. |
+| `prefetch(query)` | Returns the cached prefetch result as an ephemeral context block. |
+| `get_tool_schemas()` | Exposes 5 tools to the model (see below). |
+| `handle_tool_call(...)` | Dispatches tool calls to the MindGraph SDK. |
+| `on_session_end(messages)` | Closes the Session node and ingests the full transcript for 5-layer extraction. |
+| `shutdown()` | Drains the prefetch thread and closes any still-open session. |
+
+Subagent and cron contexts skip session open/close (the plugin checks `agent_context` in `initialize()` kwargs) so internal orchestration doesn't pollute the user-facing graph.
+
+## The 5 tools
 
 | Tool | Purpose |
 |------|---------|
@@ -15,132 +40,38 @@ MindGraph semantic graph memory plugin for [Hermes Agent](https://github.com/shu
 | `mindgraph_retrieve` | Query the graph — hybrid FTS + semantic, structured queries, traversal |
 | `mindgraph_commit` | Track agentic state — goals, decisions, plans, tasks, risks, questions |
 | `mindgraph_ingest` | Bulk content ingestion (articles, transcripts, code) |
-| `mindgraph_synthesize` | Project-scoped cross-document synthesis — mine signals, spawn Article-generation jobs |
+| `mindgraph_synthesize` | Project-scoped cross-document synthesis — mine signals, generate Article nodes |
 
-**A bundled behavioral-contract skill** (`skill.md`) installed to `~/.hermes/skills/mindgraph/SKILL.md` on first load. The agent sees it like any other Hermes skill and uses it to decide when to store, when to retrieve, and when to synthesize — without being prompted.
-
-**Session lifecycle hooks** for automatic bookkeeping: on `on_session_start` the plugin opens a MindGraph session node; on `on_session_end` it closes it. (These Hermes hooks are declared but not yet invoked by the agent core — the tools themselves work today regardless.)
-
-## Install
-
-```bash
-pip install hermes-mindgraph-plugin
-```
-
-The plugin registers itself via the `hermes_agent.plugins` entry point — Hermes discovers it on next startup, no config changes needed.
-
-## Configure
-
-Set your MindGraph API key in `~/.hermes/.env` (get one at [mindgraph.cloud](https://mindgraph.cloud)):
-
-```bash
-MINDGRAPH_API_KEY=mg_your_key_here
-```
-
-If `MINDGRAPH_API_KEY` isn't set, Hermes disables the plugin cleanly (per the manifest's `requires_env` gate) rather than crashing.
-
-Optional:
-
-```bash
-MINDGRAPH_BASE_URL=https://api.mindgraph.cloud   # override for self-hosted deployments
-MINDGRAPH_AGENT_ID=hermes                         # stamped onto every write for provenance
-```
-
-## How It's Wired
-
-```
-pip install hermes-mindgraph-plugin
-        │
-        ▼
-Hermes startup discovers the plugin via `hermes_agent.plugins` entry point
-        │
-        ▼
-Plugin's `register(ctx)` runs once
-        │
-        ├── ctx.register_tool(name=..., toolset="mindgraph", schema=..., handler=...)  × 5
-        ├── ctx.register_hook("on_session_start", …)
-        ├── ctx.register_hook("on_session_end", …)
-        └── copies skill.md → ~/.hermes/skills/mindgraph/SKILL.md
-```
-
-Run `/plugins` inside Hermes to confirm:
-
-```
-Plugins (1):
-  ✓ mindgraph v0.9.0 (5 tools, 2 hooks)
-```
-
-## Tool details
-
-### `mindgraph_remember` — store knowledge
-
-| Action | What it does |
-|--------|-------------|
-| `entity` | Create/find entities (person, org, concept, place, event, etc.) with dedup |
-| `observation` | Factual observations — pass `entity_uid` to link to an entity |
-| `claim` | Epistemic claims with evidence and calibrated confidence (0.0–1.0) |
-| `preference` | User preferences and corrections |
-| `note` | General notes, reflections, insights |
-
-### `mindgraph_retrieve` — query the graph
-
-| Mode | What it does |
-|------|-------------|
-| `context` | **Default.** Hybrid FTS + semantic search. Natural language works. |
-| `search` | Keyword-only FTS. Faster for exact name lookups. |
-| `document_index` | List all ingested documents (orient before searching). |
-| `recent` | Recently updated nodes, filterable by `node_type`. |
-| `goals` | Active goals sorted by salience. |
-| `questions` | Open questions and hypotheses. |
-| `decisions` | Open decisions needing resolution. |
-| `neighborhood` | Nodes connected to a specific node (by UID). |
-| `weak_claims` | Claims with low confidence. |
-| `contradictions` | Contradictory claims in the graph. |
-
-### `mindgraph_commit` — track agentic state
-
-| Action | Layer |
-|--------|-------|
-| `goal`, `project`, `milestone` | Intent (with dedup + update via uid) |
-| `open_decision`, `add_option`, `add_constraint`, `resolve_decision` | Intent |
-| `assess_risk`, `add_affordance` | Action |
-| `create_plan`, `create_task`, `add_step`, `update_status`, `get_plan` | Agent |
-| `start`, `complete`, `fail` | Agent (execution) |
-| `create_policy` | Agent (governance) |
-| `question`, `hypothesis`, `anomaly` | Epistemic |
-
-### `mindgraph_ingest` — bulk content
-
-Ingests long-form content (articles, transcripts, code). Under 500 chars: sync. Over 500 chars: async with job tracking via the returned `job_id`.
-
-### `mindgraph_synthesize` — project-scoped synthesis
-
-| Action | What it does |
-|--------|-------------|
-| `signals` | Mine cross-document structural signals (entity bridges, claim hubs, theory gaps, concept clusters, analogy candidates, dialectical pairs). No LLM. |
-| `run` | Spawn a background synthesis job that turns top idea clusters into Article nodes. Returns a `job_id`. |
-| `job_status` | Poll a synthesis job. |
-
-Create a project via `mindgraph_commit(action='project')`, link documents to it with the `PartOfProject` edge, then run `mindgraph_synthesize`.
+See [`hermes_mindgraph_plugin/tools.py`](hermes_mindgraph_plugin/tools.py) for action tables and parameter details; the behavioral contract the agent sees is in [`provider.py`](hermes_mindgraph_plugin/provider.py).
 
 ## Architecture
 
-The plugin uses MindGraph's [5-layer cognitive architecture](https://mindgraph.cloud):
+MindGraph's 5-layer cognitive architecture:
 
-- **Reality layer** — entities, observations, facts about the world
-- **Epistemic layer** — claims, evidence, questions, hypotheses, concepts
-- **Intent layer** — goals, decisions, projects, milestones
-- **Action layer** — risks, affordances, capabilities
-- **Agent layer** — plans, tasks, execution tracking, governance policies
+- **Reality** — entities, observations, facts
+- **Epistemic** — claims, evidence, questions, hypotheses, concepts
+- **Intent** — goals, decisions, projects, milestones
+- **Action** — risks, affordances, capabilities
+- **Agent** — plans, tasks, execution tracking, governance policies
 
-The bundled skill (`skill.md`) teaches the agent a decision tree for routing knowledge across these layers, plus anti-patterns to avoid. It's installed once on first plugin load and never overwritten if you edit it.
+The behavioral contract injected into the system prompt teaches the agent when to route knowledge into which layer, with anti-patterns to avoid (bare entity nodes, session-memory drafting, content-derived commits, confidence inflation).
 
 ## Requirements
 
+- Hermes Agent with the MemoryProvider interface (`agent/memory_provider.py`) — upstream `NousResearch/hermes-agent` as of the `plugins/memory/` refactor
 - Python ≥ 3.10
-- `mindgraph-sdk ≥ 0.4.0`
 - A MindGraph API key
-- Hermes Agent with the plugin system (any recent version)
+
+## Repo layout
+
+```
+hermes_mindgraph_plugin/
+├── __init__.py     # register(ctx) — hands a MindGraphMemoryProvider to Hermes
+├── provider.py     # MindGraphMemoryProvider(MemoryProvider)
+└── tools.py        # SDK glue: handlers, schemas, session helpers
+plugin.yaml          # Hermes manifest (pip_dependencies, requires_env)
+after-install.md     # Rendered by Hermes after install
+```
 
 ## License
 

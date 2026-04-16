@@ -1,18 +1,29 @@
+# This is a Hermes memory-provider plugin, not a pip package.
+#
+# Install with:
+#   hermes plugins install shuruheel/hermes-mindgraph-plugin
+#
+# This pyproject.toml exists only so the repo can be pip-installed for local
+# development and testing (``pip install -e ".[dev]"``). Hermes itself loads
+# the plugin from ``~/.hermes/plugins/hermes-mindgraph-plugin/`` after git clone
+# and installs the runtime dependency (``mindgraph-sdk``) via the
+# ``pip_dependencies`` field in ``plugin.yaml``.
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mindgraph-plugin"
-version = "0.9.0"
-description = "MindGraph semantic graph memory plugin for Hermes Agent"
+version = "0.10.0"
+description = "MindGraph semantic graph memory provider for Hermes Agent"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Shan Rizvi", email = "shan@rizvi.nu" },
 ]
-keywords = ["hermes", "agent", "mindgraph", "memory", "semantic-graph", "plugin"]
+keywords = ["hermes", "agent", "mindgraph", "memory", "semantic-graph", "memory-provider"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,6 +38,12 @@ dependencies = [
     "mindgraph-sdk>=0.4.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pyyaml>=6.0",
+]
+
 [project.urls]
 Homepage = "https://mindgraph.cloud"
 Repository = "https://github.com/shuruheel/hermes-mindgraph-plugin"
@@ -34,6 +51,3 @@ Issues = "https://github.com/shuruheel/hermes-mindgraph-plugin/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hermes_mindgraph_plugin"]
-
-[project.entry-points."hermes_agent.plugins"]
-mindgraph = "hermes_mindgraph_plugin"
