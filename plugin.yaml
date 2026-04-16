@@ -1,17 +1,23 @@
-# For manual installation: copy this directory to
-# ~/.hermes/plugins/memory/mindgraph/
-#
 # For pip installation, use: pip install hermes-mindgraph-plugin
-# (auto-discovered via entry points, no manual copy needed)
+# (auto-discovered via the hermes_agent.plugins entry point — no manual copy).
+#
+# For manual installation, copy this directory to ~/.hermes/plugins/mindgraph/.
 
 name: mindgraph
-version: 0.8.0
+version: 0.9.0
 description: >
-  Semantic graph memory provider — injects session context (goals, decisions,
-  policies) and per-turn topic-relevant knowledge from MindGraph into the
-  agent's context via the MemoryProvider interface.
+  Semantic graph memory for Hermes Agent — persistent knowledge capture,
+  hybrid retrieval, goal/decision/plan tracking, long-form content ingestion,
+  and project-scoped cross-document synthesis via MindGraph.
 author: Shan Rizvi
-hooks:
+requires_env:
+  - MINDGRAPH_API_KEY
+provides_tools:
+  - mindgraph_remember
+  - mindgraph_retrieve
+  - mindgraph_commit
+  - mindgraph_ingest
+  - mindgraph_synthesize
+provides_hooks:
+  - on_session_start
   - on_session_end
-  - on_pre_compress
-  - on_memory_write
