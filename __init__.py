@@ -18,6 +18,8 @@ and ``tools.py`` for the SDK integration.
 
 from __future__ import annotations
 
+import logging
+
 __version__ = "0.10.0"
 
 
@@ -84,9 +86,6 @@ def _bootstrap_submodules() -> None:
 
 
 _bootstrap_submodules()
-
-
-import logging
 
 logger = logging.getLogger(__name__)
 
